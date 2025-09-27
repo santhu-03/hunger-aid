@@ -1,10 +1,11 @@
 import { initializeApp } from 'firebase/app';
-import { createUserWithEmailAndPassword, getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { createUserWithEmailAndPassword, getAuth, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import { doc, getDoc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import AdminDashboard from './AdminDashboard';
 import BeneficiaryDashboard from './BeneficiaryDashboard';
+import DonationScreen from './DonationScreen'; // Importing DonationScreen
 import DonorDashboard from './DonorDashboard';
 import VolunteerDashboard from './VolunteerDashboard';
 
@@ -30,8 +31,16 @@ export default function App() {
   const [role, setRole] = useState('Donor');
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
-  const [user, setUser] = useState(null);
-  const [userData, setUserData] = useState(null);
+  interface UserData {
+    name: string;
+    email: string;
+    role: string;
+    createdAt?: any;
+    [key: string]: any;
+  }
+  
+  const [user, setUser] = useState<any>(null);
+  const [userData, setUserData] = useState<UserData | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
 
   // Auth form states
@@ -50,7 +59,7 @@ export default function App() {
           const docRef = doc(db, 'users', u.uid);
           const docSnap = await getDoc(docRef);
           if (docSnap.exists()) {
-            setUserData(docSnap.data());
+            setUserData(docSnap.data() as UserData);
           }
         } catch (e) {
           Alert.alert('Error', 'Failed to fetch user data.');
@@ -94,14 +103,19 @@ export default function App() {
         return;
       }
     } catch (e) {
-      if (e.code === 'auth/user-not-found') {
-        setErrorMsg('User does not exist.');
-      } else if (e.code === 'auth/wrong-password') {
-        setErrorMsg('Invalid password.');
-      } else if (e.code === 'auth/invalid-email') {
-        setErrorMsg('Invalid email address.');
+      if (typeof e === 'object' && e !== null && 'code' in e) {
+        const error = e as { code: string; message?: string };
+        if (error.code === 'auth/user-not-found') {
+          setErrorMsg('User does not exist.');
+        } else if (error.code === 'auth/wrong-password') {
+          setErrorMsg('Invalid password.');
+        } else if (error.code === 'auth/invalid-email') {
+          setErrorMsg('Invalid email address.');
+        } else {
+          setErrorMsg(error.message || 'An error occurred.');
+        }
       } else {
-        setErrorMsg(e.message);
+        setErrorMsg('An unknown error occurred.');
       }
     }
     setPending(false);
@@ -128,14 +142,19 @@ export default function App() {
         createdAt: serverTimestamp(),
       });
     } catch (e) {
-      if (e.code === 'auth/email-already-in-use') {
-        setErrorMsg('Email is already in use.');
-      } else if (e.code === 'auth/invalid-email') {
-        setErrorMsg('Invalid email address.');
-      } else if (e.code === 'auth/weak-password') {
-        setErrorMsg('Password is too weak.');
+      if (typeof e === 'object' && e !== null && 'code' in e) {
+        const error = e as { code: string; message?: string };
+        if (error.code === 'auth/email-already-in-use') {
+          setErrorMsg('Email is already in use.');
+        } else if (error.code === 'auth/invalid-email') {
+          setErrorMsg('Invalid email address.');
+        } else if (error.code === 'auth/weak-password') {
+          setErrorMsg('Password is too weak.');
+        } else {
+          setErrorMsg(error.message || 'An error occurred.');
+        }
       } else {
-        setErrorMsg(e.message);
+        setErrorMsg('An unknown error occurred.');
       }
     }
     setPending(false);
@@ -155,17 +174,22 @@ export default function App() {
       return;
     }
     try {
-      await auth.sendPasswordResetEmail(forgotEmail);
+      await sendPasswordResetEmail(auth, forgotEmail);
       Alert.alert('Success', 'Password reset email sent.');
       setForgotVisible(false);
       setForgotEmail('');
     } catch (e) {
-      if (e.code === 'auth/user-not-found') {
-        setErrorMsg('User does not exist.');
-      } else if (e.code === 'auth/invalid-email') {
-        setErrorMsg('Invalid email address.');
+      if (typeof e === 'object' && e !== null && 'code' in e) {
+        const error = e as { code: string; message?: string };
+        if (error.code === 'auth/user-not-found') {
+          setErrorMsg('User does not exist.');
+        } else if (error.code === 'auth/invalid-email') {
+          setErrorMsg('Invalid email address.');
+        } else {
+          setErrorMsg(error.message || 'An error occurred.');
+        }
       } else {
-        setErrorMsg(e.message);
+        setErrorMsg('An unknown error occurred.');
       }
     }
   };
@@ -337,6 +361,10 @@ export default function App() {
           </View>
         </View>
       </Modal>
+      {/* Donation Screen - Example usage */}
+      {user && userData && userData.role === 'Donor' && (
+        <DonationScreen />
+      )}
     </View>
   );
 }

@@ -1,6 +1,7 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import React, { useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import BeneficiaryProfile from '../profile/BeneficiaryProfile';
 
 const beneficiaryMenuOptions = [
   { icon: "home", label: "Home" },
@@ -132,144 +133,164 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     }
   };
 
+  // Add this function to handle profile save from BeneficiaryProfile
+  const handleProfileSave = updatedData => {
+    if (updatedData.profilePic) setProfilePic(updatedData.profilePic);
+    if (updatedData.name) {
+      const [f, ...rest] = updatedData.name.split(' ');
+      setFirstName(f);
+      setLastName(rest.join(' '));
+      userData.name = updatedData.name;
+    }
+    Object.assign(userData, updatedData);
+  };
+
   return (
     <View style={styles.root}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => setMenuVisible(true)} style={styles.hamburgerBtn}>
-          <MaterialIcons name="menu" size={32} color="#2e7d32" />
+          <MaterialIcons name="menu" size={32} color="#fff" />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Hunger Aid</Text>
         </View>
         <TouchableOpacity onPress={() => {}} style={styles.headerNotifBtn}>
-          <FontAwesome5 name="bell" size={22} color="#2e7d32" />
+          <FontAwesome5 name="bell" size={22} color="#fff" />
         </TouchableOpacity>
       </View>
       {/* Main Content */}
-      <ScrollView contentContainerStyle={styles.feed}>
-        {/* Welcome Card */}
-        <View style={styles.cardWelcome}>
-          <Text style={styles.cardWelcomeText}>{feedCards[0].content}</Text>
-        </View>
-        {/* Success Story Card */}
-        <View style={styles.card}>
-          {feedCards[1].image ? (
-            <Image source={feedCards[1].image} style={styles.cardImage} />
-          ) : (
-            <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-              <Text style={{ color: '#2e7d32' }}>Image</Text>
-            </View>
-          )}
-          <Text style={styles.cardTitle}>Success Story</Text>
-          <Text style={styles.cardBody}>{feedCards[1].story}</Text>
-          <TouchableOpacity style={styles.ctaBtn}>
-            <Text style={styles.ctaBtnText}>Read Full Story</Text>
-          </TouchableOpacity>
-        </View>
-        {/* Project Update Card */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>{feedCards[2].campaign}</Text>
-          <View style={styles.progressBarBg}>
-            <View style={[styles.progressBarFill, { width: `${feedCards[2].progress * 100}%` }]} />
+      {activeMenu === 'Profile' ? (
+        <BeneficiaryProfile
+          userData={userData}
+          onSave={handleProfileSave}
+          onClose={() => setActiveMenu('Home')}
+        />
+      ) : (
+        <ScrollView contentContainerStyle={styles.feed}>
+          {/* Welcome Card */}
+          <View style={styles.cardWelcome}>
+            <Text style={styles.cardWelcomeText}>{feedCards[0].content}</Text>
           </View>
-          <Text style={styles.cardBody}>
-            ${feedCards[2].raised} raised of ${feedCards[2].goal} goal
-          </Text>
-          <Text style={styles.cardBody}>{feedCards[2].update}</Text>
-          <TouchableOpacity style={styles.ctaBtn}>
-            <Text style={styles.ctaBtnText}>View Campaign</Text>
-          </TouchableOpacity>
-        </View>
-        {/* Thank You Card */}
-        <View style={styles.card}>
-          {feedCards[3].image ? (
-            <Image source={feedCards[3].image} style={styles.cardImageSmall} />
-          ) : (
-            <View style={[styles.cardImageSmall, { justifyContent: 'center', alignItems: 'center' }]}>
-              <Text style={{ color: '#2e7d32' }}>Image</Text>
-            </View>
-          )}
-          <Text style={styles.cardTitle}>Thank You!</Text>
-          <Text style={styles.cardBody}>{feedCards[3].message}</Text>
-          <Text style={styles.cardBody}>Recent donation: {feedCards[3].amount}</Text>
-        </View>
-        {/* Impact Stat Card */}
-        <View style={styles.cardStat}>
-          <FontAwesome5 name={feedCards[4].icon} size={32} color="#2e7d32" />
-          <Text style={styles.cardStatNumber}>{feedCards[4].stat}</Text>
-          <Text style={styles.cardStatText}>{feedCards[4].text}</Text>
-        </View>
-        {/* New Campaign Card */}
-        <View style={styles.card}>
-          {feedCards[5].image ? (
-            <Image source={feedCards[5].image} style={styles.cardImage} />
-          ) : (
-            <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-              <Text style={{ color: '#2e7d32' }}>Image</Text>
-            </View>
-          )}
-          <Text style={styles.cardTitle}>{feedCards[5].title}</Text>
-          <TouchableOpacity style={styles.ctaBtnAccent}>
-            <Text style={styles.ctaBtnTextAccent}>Donate Now</Text>
-          </TouchableOpacity>
-        </View>
-        {/* Feed posts */}
-        {feedPosts.map(post => (
-          <View key={post.id} style={styles.feedPostCard}>
-            <Text style={styles.feedPostAuthor}>{post.author}</Text>
-            <Text style={styles.feedPostContent}>{post.content}</Text>
-            {post.media && (
-              post.media.type === 'video' ? (
-                <View style={styles.feedPostMedia}>
-                  <Text style={{ color: '#388e3c', fontWeight: 'bold' }}>Video attached</Text>
-                </View>
-              ) : (
-                <Image source={{ uri: post.media.uri }} style={styles.feedPostImage} />
-              )
+          {/* Success Story Card */}
+          <View style={styles.cardSuccess}>
+            {feedCards[1].image ? (
+              <Image source={feedCards[1].image} style={styles.cardImage} />
+            ) : (
+              <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
+                <Text style={{ color: '#fff' }}>Image</Text>
+              </View>
             )}
-            <View style={styles.feedPostActions}>
-              <TouchableOpacity
-                onPress={() => handleToggleLikePost(post.id)}
-                style={styles.feedPostActionBtn}
-              >
-                <FontAwesome5
-                  name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"}
-                  size={16}
-                  color={likedPosts[post.id] ? "#2e7d32" : "#888"}
-                />
-                <Text style={[
-                  styles.feedPostActionText,
-                  likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }
-                ]}>
-                  {likedPosts[post.id] ? "Liked" : "Like"}
-                </Text>
-              </TouchableOpacity>
+            <Text style={styles.cardTitle}>Success Story</Text>
+            <Text style={styles.cardBody}>{feedCards[1].story}</Text>
+            <TouchableOpacity style={styles.ctaBtn}>
+              <Text style={styles.ctaBtnText}>Read Full Story</Text>
+            </TouchableOpacity>
+          </View>
+          {/* Project Update Card */}
+          <View style={styles.cardProject}>
+            <Text style={styles.cardTitle}>{feedCards[2].campaign}</Text>
+            <View style={styles.progressBarBg}>
+              <View style={[styles.progressBarFill, { width: `${feedCards[2].progress * 100}%` }]} />
             </View>
-            {/* Comments */}
-            <View style={styles.feedPostComments}>
-              {post.comments.map((c, idx) => (
-                <View key={idx} style={styles.feedPostComment}>
-                  <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
-                  <Text style={styles.feedPostCommentText}>{c.text}</Text>
-                </View>
-              ))}
-              <View style={styles.feedPostCommentInputRow}>
-                <TextInput
-                  style={styles.feedPostCommentInput}
-                  value={commentInputs[post.id] || ''}
-                  onChangeText={text => setCommentInputs({ ...commentInputs, [post.id]: text })}
-                  placeholder="Write a comment..."
-                />
-                <TouchableOpacity onPress={() => handleAddComment(post.id)} style={styles.feedPostCommentBtn}>
-                  <Text style={styles.feedPostCommentBtnText}>Post</Text>
+            <Text style={styles.cardBody}>
+              ${feedCards[2].raised} raised of ${feedCards[2].goal} goal
+            </Text>
+            <Text style={styles.cardBody}>{feedCards[2].update}</Text>
+            <TouchableOpacity style={styles.ctaBtn}>
+              <Text style={styles.ctaBtnText}>View Campaign</Text>
+            </TouchableOpacity>
+          </View>
+          {/* Thank You Card */}
+          <View style={styles.cardThankyou}>
+            {feedCards[3].image ? (
+              <Image source={feedCards[3].image} style={styles.cardImageSmall} />
+            ) : (
+              <View style={[styles.cardImageSmall, { justifyContent: 'center', alignItems: 'center' }]}>
+                <Text style={{ color: '#fff' }}>Image</Text>
+              </View>
+            )}
+            <Text style={styles.cardTitle}>Thank You!</Text>
+            <Text style={styles.cardBody}>{feedCards[3].message}</Text>
+            <Text style={styles.cardBody}>Recent donation: {feedCards[3].amount}</Text>
+          </View>
+          {/* Impact Stat Card */}
+          <View style={styles.cardStat}>
+            <FontAwesome5 name={feedCards[4].icon} size={32} color="#fff" />
+            <Text style={styles.cardStatNumber}>{feedCards[4].stat}</Text>
+            <Text style={styles.cardStatText}>{feedCards[4].text}</Text>
+          </View>
+          {/* New Campaign Card */}
+          <View style={styles.cardCampaign}>
+            {feedCards[5].image ? (
+              <Image source={feedCards[5].image} style={styles.cardImage} />
+            ) : (
+              <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
+                <Text style={{ color: '#fff' }}>Image</Text>
+              </View>
+            )}
+            <Text style={styles.cardTitle}>{feedCards[5].title}</Text>
+            <TouchableOpacity style={styles.ctaBtnAccent}>
+              <Text style={styles.ctaBtnTextAccent}>Donate Now</Text>
+            </TouchableOpacity>
+          </View>
+          {/* Feed posts */}
+          {feedPosts.map(post => (
+            <View key={post.id} style={styles.feedPostCard}>
+              <Text style={styles.feedPostAuthor}>{post.author}</Text>
+              <Text style={styles.feedPostContent}>{post.content}</Text>
+              {post.media && (
+                post.media.type === 'video' ? (
+                  <View style={styles.feedPostMedia}>
+                    <Text style={{ color: '#388e3c', fontWeight: 'bold' }}>Video attached</Text>
+                  </View>
+                ) : (
+                  <Image source={{ uri: post.media.uri }} style={styles.feedPostImage} />
+                )
+              )}
+              <View style={styles.feedPostActions}>
+                <TouchableOpacity
+                  onPress={() => handleToggleLikePost(post.id)}
+                  style={styles.feedPostActionBtn}
+                >
+                  <FontAwesome5
+                    name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"}
+                    size={16}
+                    color={likedPosts[post.id] ? "#2e7d32" : "#888"}
+                  />
+                  <Text style={[
+                    styles.feedPostActionText,
+                    likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }
+                  ]}>
+                    {likedPosts[post.id] ? "Liked" : "Like"}
+                  </Text>
                 </TouchableOpacity>
               </View>
+              {/* Comments */}
+              <View style={styles.feedPostComments}>
+                {post.comments.map((c, idx) => (
+                  <View key={idx} style={styles.feedPostComment}>
+                    <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
+                    <Text style={styles.feedPostCommentText}>{c.text}</Text>
+                  </View>
+                ))}
+                <View style={styles.feedPostCommentInputRow}>
+                  <TextInput
+                    style={styles.feedPostCommentInput}
+                    value={commentInputs[post.id] || ''}
+                    onChangeText={text => setCommentInputs({ ...commentInputs, [post.id]: text })}
+                    placeholder="Write a comment..."
+                  />
+                  <TouchableOpacity onPress={() => handleAddComment(post.id)} style={styles.feedPostCommentBtn}>
+                    <Text style={styles.feedPostCommentBtnText}>Post</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
             </View>
-          </View>
-        ))}
-        <View style={{ height: 80 }} />
-      </ScrollView>
+          ))}
+          <View style={{ height: 80 }} />
+        </ScrollView>
+      )}
       {/* Floating Compose Button */}
       <TouchableOpacity style={styles.fab} onPress={handleOpenPostModal}>
         <FontAwesome5 name="pen" size={24} color="#fff" />
@@ -366,25 +387,15 @@ function DrawerItem({ icon, label, active, onPress }) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#f7fafc' },
+  root: { flex: 1, backgroundColor: '#f3f8f3' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#e8f5e9',
+    backgroundColor: '#2e7d32',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#c8e6c9',
+    borderBottomWidth: 0,
     justifyContent: 'flex-start',
-  },
-  logo: {
-    width: 40,
-    height: 40,
-    resizeMode: 'contain',
-  },
-  hamburgerBtn: {
-    padding: 4,
-    marginRight: 16,
   },
   headerCenter: {
     flex: 1,
@@ -393,19 +404,75 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 22,
     fontWeight: 'bold',
-    color: '#2e7d32',
+    color: '#fff',
     textAlign: 'center',
+  },
+  hamburgerBtn: {
+    padding: 4,
+    marginRight: 16,
   },
   headerNotifBtn: {
     padding: 4,
   },
   feed: { padding: 16, paddingBottom: 32 },
-  feedTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#2e7d32',
+  cardWelcome: {
+    backgroundColor: '#43a047',
+    borderRadius: 16,
+    padding: 20,
     marginBottom: 18,
-    textAlign: 'left',
+    alignItems: 'center',
+    shadowColor: '#388e3c',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+  },
+  cardWelcomeText: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  cardSuccess: {
+    backgroundColor: '#e9f9ebff',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+       borderLeftWidth: 6,
+    borderLeftColor: '#43a047',
+    shadowColor: '#2e7d32',
+    shadowOpacity: 0.10,
+    shadowRadius: 8,
+  },
+  cardProject: {
+    backgroundColor: '#e8f5e9',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+    borderLeftWidth: 6,
+    borderLeftColor: '#43a047',
+    shadowColor: '#388e3c',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+  },
+  cardThankyou: {
+    backgroundColor: '#fffde7',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+    borderLeftWidth: 6,
+    borderLeftColor: '#ffb300',
+    shadowColor: '#ffb300',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+  },
+  cardCampaign: {
+    backgroundColor: '#e3f2fd',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+    borderLeftWidth: 6,
+    borderLeftColor: '#1976d2',
+    shadowColor: '#1976d2',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
   },
   card: {
     backgroundColor: '#fff',
@@ -413,13 +480,6 @@ const styles = StyleSheet.create({
     padding: 20,
     marginBottom: 18,
     elevation: 2,
-  },
-  cardWelcome: {
-    backgroundColor: '#d1e7dd',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 18,
-    alignItems: 'center',
   },
   cardTitle: {
     fontSize: 18,
@@ -433,7 +493,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   ctaBtn: {
-    backgroundColor: '#2e7d32',
+    backgroundColor: '#1976d2',
     borderRadius: 8,
     paddingVertical: 10,
     alignItems: 'center',
@@ -591,7 +651,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#2e7d32',
   },
   cardStat: {
-    backgroundColor: '#fff',
+    backgroundColor: '#388e3c',
     borderRadius: 16,
     padding: 20,
     marginBottom: 18,
@@ -602,12 +662,12 @@ const styles = StyleSheet.create({
   cardStatNumber: {
     fontSize: 32,
     fontWeight: 'bold',
-    color: '#2e7d32',
+    color: '#fff',
     marginRight: 8,
   },
   cardStatText: {
     fontSize: 15,
-    color: '#333',
+    color: '#fff',
   },
   fab: {
     position: 'absolute',
@@ -620,19 +680,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 4,
-  },
-  headerCenter: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    textAlign: 'center',
-  },
-  headerNotifBtn: {
-    padding: 4,
   },
   composeBtn: {
     flexDirection: 'row',
@@ -919,335 +966,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#2e7d32',
   },
   cardStat: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    elevation: 2,
-  },
-  cardStatNumber: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginRight: 8,
-  },
-  cardStatText: {
-    fontSize: 15,
-    color: '#333',
-  },
-  fab: {
-    position: 'absolute',
-    right: 32,
-    bottom: 32,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#2e7d32',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 4,
-  },
-  headerCenter: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    textAlign: 'center',
-  },
-  headerNotifBtn: {
-    padding: 4,
-  },
-  composeBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#2e7d32',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    marginBottom: 16,
-  },
-  composeBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 15,
-    marginLeft: 8,
-  },
-  feedPostCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    elevation: 2,
-  },
-  feedPostAuthor: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 8,
-  },
-  feedPostContent: {
-    fontSize: 15,
-    color: '#333',
-    marginBottom: 12,
-  },
-  feedPostMedia: {
-    width: '100%',
-    height: 200,
-    borderRadius: 12,
-    backgroundColor: '#f0f0f0',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  feedPostImage: {
-    width: '100%',
-    height: 200,
-    borderRadius: 12,
-    resizeMode: 'cover',
-    marginBottom: 12,
-  },
-  feedPostActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  feedPostActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    marginRight: 12,
-  },
-  feedPostActionText: {
-    fontSize: 14,
-    color: '#2e7d32',
-    marginLeft: 4,
-  },
-  feedPostComments: {
-    marginTop: 8,
-  },
-  feedPostComment: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  feedPostCommentAuthor: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginRight: 8,
-  },
-  feedPostCommentText: {
-    fontSize: 14,
-    color: '#333',
-  },
-  feedPostCommentInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  feedPostCommentInput: {
-    flex: 1,
-    height: 40,
-    borderColor: '#ccc',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginRight: 8,
-  },
-  feedPostCommentBtn: {
-    backgroundColor: '#2e7d32',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-  },
-  feedPostCommentBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  postModalOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  postModalContent: {
-    width: '90%',
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 24,
-    elevation: 4,
-  },
-  createPostTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 16,
-  },
-  createPostInput: {
-    height: 100,
-    borderColor: '#ccc',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginBottom: 16,
-    textAlignVertical: 'top',
-  },
-  attachBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#e8f5e9',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginRight: 8,
-  },
-  attachBtnText: {
-    color: '#2e7d32',
-    fontWeight: 'bold',
-    fontSize: 14,
-    marginLeft: 4,
-  },
-  removeMediaBtn: {
-    backgroundColor: '#e57373',
-    borderRadius: 8,
-    padding: 8,
-  },
-  createPostBtn: {
-    backgroundColor: '#2e7d32',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    marginRight: 8,
-  },
-  createPostBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
-  cancelPostBtn: {
-    backgroundColor: '#ccc',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-  },
-  cancelPostBtnText: {
-    color: '#333',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
-  drawerOverlay: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  drawerBg: { flex: 1 },
-  drawerLeft: {
-    width: 280,
-    backgroundColor: '#fff',
-    paddingTop: 32,
-    paddingHorizontal: 20,
-    borderTopLeftRadius: 24,
-    borderBottomLeftRadius: 24,
-    elevation: 8,
-    position: 'absolute',
-    left: 0, top: 0, bottom: 0,
-  },
-  drawerHeader: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  profilePic: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    marginBottom: 12,
-    backgroundColor: '#c8e6c9',
-  },
-  drawerName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 8,
-  },
-  drawerMenu: {
-    marginBottom: 24,
-    alignItems: 'flex-start',
-  },
-  drawerItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    marginBottom: 2,
-    minWidth: 220,
-  },
-  drawerItemActive: {
     backgroundColor: '#388e3c',
-    minWidth: 220,
-  },
-  drawerItemText: {
-    fontSize: 16,
-    color: '#2e7d32',
-    fontWeight: 'bold',
-  },
-  drawerItemTextActive: {
-    color: '#fff',
-  },
-  drawerLogout: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#c8e6c9',
-    marginTop: 12,
-  },
-  drawerLogoutText: {
-    fontSize: 16,
-    color: '#2e7d32',
-    fontWeight: 'bold',
-    marginLeft: 12,
-  },
-  cardImage: {
-    width: '100%',
-    height: 120,
-    borderRadius: 12,
-    marginBottom: 12,
-    resizeMode: 'cover',
-  },
-  cardImageSmall: {
-    width: '100%',
-    height: 80,
-    borderRadius: 12,
-    marginBottom: 12,
-    resizeMode: 'cover',
-  },
-  progressBarBg: {
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#e0e0e0',
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  progressBarFill: {
-    height: '100%',
-    borderRadius: 4,
-    backgroundColor: '#2e7d32',
-  },
-  cardStat: {
-    backgroundColor: '#fff',
     borderRadius: 16,
     padding: 20,
     marginBottom: 18,
@@ -1258,339 +977,11 @@ const styles = StyleSheet.create({
   cardStatNumber: {
     fontSize: 32,
     fontWeight: 'bold',
-    color: '#2e7d32',
+    color: '#fff',
     marginRight: 8,
   },
   cardStatText: {
     fontSize: 15,
-    color: '#333',
-  },
-  fab: {
-    position: 'absolute',
-    right: 32,
-    bottom: 32,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#2e7d32',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 4,
-  },
-  headerCenter: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    textAlign: 'center',
-  },
-  headerNotifBtn: {
-    padding: 4,
-  },
-  composeBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#2e7d32',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    marginBottom: 16,
-  },
-  composeBtnText: {
     color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 15,
-    marginLeft: 8,
-  },
-  feedPostCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    elevation: 2,
-  },
-  feedPostAuthor: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 8,
-  },
-  feedPostContent: {
-    fontSize: 15,
-    color: '#333',
-    marginBottom: 12,
-  },
-  feedPostMedia: {
-    width: '100%',
-    height: 200,
-    borderRadius: 12,
-    backgroundColor: '#f0f0f0',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  feedPostImage: {
-    width: '100%',
-    height: 200,
-    borderRadius: 12,
-    resizeMode: 'cover',
-    marginBottom: 12,
-  },
-  feedPostActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  feedPostActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    marginRight: 12,
-  },
-  feedPostActionText: {
-    fontSize: 14,
-    color: '#2e7d32',
-    marginLeft: 4,
-  },
-  feedPostComments: {
-    marginTop: 8,
-  },
-  feedPostComment: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  feedPostCommentAuthor: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginRight: 8,
-  },
-  feedPostCommentText: {
-    fontSize: 14,
-    color: '#333',
-  },
-  feedPostCommentInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  feedPostCommentInput: {
-    flex: 1,
-    height: 40,
-    borderColor: '#ccc',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginRight: 8,
-  },
-  feedPostCommentBtn: {
-    backgroundColor: '#2e7d32',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-  },
-  feedPostCommentBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  postModalOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  postModalContent: {
-    width: '90%',
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 24,
-    elevation: 4,
-  },
-  createPostTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 16,
-  },
-  createPostInput: {
-    height: 100,
-    borderColor: '#ccc',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginBottom: 16,
-    textAlignVertical: 'top',
-  },
-  attachBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#e8f5e9',
-    borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginRight: 8,
-  },
-  attachBtnText: {
-    color: '#2e7d32',
-    fontWeight: 'bold',
-    fontSize: 14,
-    marginLeft: 4,
-  },
-  removeMediaBtn: {
-    backgroundColor: '#e57373',
-    borderRadius: 8,
-    padding: 8,
-  },
-  createPostBtn: {
-    backgroundColor: '#2e7d32',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    marginRight: 8,
-  },
-  createPostBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
-  cancelPostBtn: {
-    backgroundColor: '#ccc',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-  },
-  cancelPostBtnText: {
-    color: '#333',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
-  drawerOverlay: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  drawerBg: { flex: 1 },
-  drawerLeft: {
-    width: 280,
-    backgroundColor: '#fff',
-    paddingTop: 32,
-    paddingHorizontal: 20,
-    borderTopLeftRadius: 24,
-    borderBottomLeftRadius: 24,
-    elevation: 8,
-    position: 'absolute',
-    left: 0, top: 0, bottom: 0,
-  },
-  drawerHeader: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  profilePic: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    marginBottom: 12,
-    backgroundColor: '#c8e6c9',
-  },
-  drawerName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 8,
-  },
-  drawerMenu: {
-    marginBottom: 24,
-    alignItems: 'flex-start',
-  },
-  drawerItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    marginBottom: 2,
-    minWidth: 220,
-  },
-  drawerItemActive: {
-    backgroundColor: '#388e3c',
-    minWidth: 220,
-  },
-  drawerItemText: {
-    fontSize: 16,
-    color: '#2e7d32',
-    fontWeight: 'bold',
-  },
-  drawerItemTextActive: {
-    color: '#fff',
-  },
-  drawerLogout: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#c8e6c9',
-    marginTop: 12,
-  },
-  drawerLogoutText: {
-    fontSize: 16,
-    color: '#2e7d32',
-    fontWeight: 'bold',
-    marginLeft: 12,
-  },
-  cardImage: {
-    width: '100%',
-    height: 120,
-    borderRadius: 12,
-    marginBottom: 12,
-    resizeMode: 'cover',
-  },
-  cardImageSmall: {
-    width: '100%',
-    height: 80,
-    borderRadius: 12,
-    marginBottom: 12,
-    resizeMode: 'cover',
-  },
-  progressBarBg: {
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#e0e0e0',
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  progressBarFill: {
-    height: '100%',
-    borderRadius: 4,
-    backgroundColor: '#2e7d32',
-  },
-  cardStat: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    elevation: 2,
-  },
-  cardStatNumber: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginRight: 8,
-  },
-  cardStatText: {
-    fontSize: 15,
-    color: '#333',
   },
 });

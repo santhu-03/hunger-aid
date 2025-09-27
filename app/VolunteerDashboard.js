@@ -1,9 +1,8 @@
-import { FontAwesome5, Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import DonorProfile from '../profile/DonorProfile';
-import Donation from './Donation';
+import VolunteerProfile from '../profile/VolunteerProfile';
 
 // Use the same feedCards and feed logic as DonorDashboard
 export default function VolunteerDashboard({ userData, onLogout }) {
@@ -139,151 +138,61 @@ export default function VolunteerDashboard({ userData, onLogout }) {
 
   return (
     <View style={styles.root}>
-      {/* Sticky Header */}
+      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => setMenuVisible(true)} style={{ marginRight: 16 }}>
-          <MaterialIcons name="menu" size={32} color="#2e7d32" />
+        <TouchableOpacity onPress={() => setMenuVisible(true)} style={styles.hamburgerBtn}>
+          <MaterialIcons name="menu" size={32} color="#fff" />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Hunger Aid</Text>
         </View>
-        <TouchableOpacity onPress={() => {}}>
-          <Ionicons name="notifications-outline" size={28} color="#2e7d32" />
+        <TouchableOpacity onPress={() => {}} style={styles.headerNotifBtn}>
+          <FontAwesome5 name="bell" size={22} color="#fff" />
         </TouchableOpacity>
       </View>
       {/* Main Content */}
       {activeMenu === 'Profile' ? (
-        <DonorProfile
+        <VolunteerProfile
           userData={userData}
           onSave={handleProfileSave}
           onClose={() => setActiveMenu('Home')}
         />
-      ) : activeMenu === 'Donate' ? (
-        <Donation userData={userData} />
       ) : (
         <>
           <ScrollView contentContainerStyle={styles.feed}>
-            {/* Welcome Card */}
-            <View style={styles.cardWelcome}>
-              <Text style={styles.cardWelcomeText}>{feedCards[0].content}</Text>
-            </View>
-            {/* Success Story Card */}
-            <View style={styles.card}>
-              {feedCards[1].image ? (
-                <Image source={feedCards[1].image} style={styles.cardImage} />
-              ) : (
-                <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: '#2e7d32' }}>Image</Text>
-                </View>
-              )}
-              <Text style={styles.cardTitle}>Success Story</Text>
-              <Text style={styles.cardBody}>{feedCards[1].story}</Text>
+            {/* New Opportunities Card */}
+            <View style={styles.cardOpportunity}>
+              <Text style={styles.cardTitle}>New Opportunity</Text>
+              <Image source={feedCards[0].image} style={styles.cardImage} />
+              <Text style={styles.cardBody}>{feedCards[0].text}</Text>
               <TouchableOpacity style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>Read Full Story</Text>
+                <Text style={styles.ctaBtnText}>{feedCards[0].cta}</Text>
               </TouchableOpacity>
             </View>
-            {/* Project Update Card */}
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>{feedCards[2].campaign}</Text>
-              <View style={styles.progressBarBg}>
-                <View style={[styles.progressBarFill, { width: `${feedCards[2].progress * 100}%` }]} />
-              </View>
-              <Text style={styles.cardBody}>
-                ${feedCards[2].raised} raised of ${feedCards[2].goal} goal
-              </Text>
-              <Text style={styles.cardBody}>{feedCards[2].update}</Text>
+            {/* Schedule Reminder Card */}
+            <View style={styles.cardSchedule}>
+              <Text style={styles.cardTitle}>Schedule Reminder</Text>
+              <Text style={styles.cardBody}>{feedCards[1].text}</Text>
               <TouchableOpacity style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>View Campaign</Text>
+                <Text style={styles.ctaBtnText}>{feedCards[1].cta}</Text>
               </TouchableOpacity>
             </View>
-            {/* Thank You Card */}
-            <View style={styles.card}>
-              {feedCards[3].image ? (
-                <Image source={feedCards[3].image} style={styles.cardImageSmall} />
-              ) : (
-                <View style={[styles.cardImageSmall, { justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: '#2e7d32' }}>Image</Text>
-                </View>
-              )}
-              <Text style={styles.cardTitle}>Thank You!</Text>
-              <Text style={styles.cardBody}>{feedCards[3].message}</Text>
-              <Text style={styles.cardBody}>Recent donation: {feedCards[3].amount}</Text>
+            {/* Impact & Thank You Card */}
+            <View style={styles.cardImpact}>
+              <Text style={styles.cardTitle}>Impact & Thank You</Text>
+              <Image source={feedCards[2].image} style={styles.cardImage} />
+              <Text style={styles.cardBody}>{feedCards[2].text}</Text>
             </View>
-            {/* Impact Stat Card */}
-            <View style={styles.cardStat}>
-              <FontAwesome5 name={feedCards[4].icon} size={32} color="#2e7d32" />
-              <Text style={styles.cardStatNumber}>{feedCards[4].stat}</Text>
-              <Text style={styles.cardStatText}>{feedCards[4].text}</Text>
+            {/* Milestone & Recognition Card */}
+            <View style={styles.cardMilestone}>
+              <Text style={styles.cardTitle}>Milestone</Text>
+              <Text style={styles.cardBody}>{feedCards[3].text}</Text>
             </View>
-            {/* New Campaign Card */}
-            <View style={styles.card}>
-              {feedCards[5].image ? (
-                <Image source={feedCards[5].image} style={styles.cardImage} />
-              ) : (
-                <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: '#2e7d32' }}>Image</Text>
-                </View>
-              )}
-              <Text style={styles.cardTitle}>{feedCards[5].title}</Text>
-              <TouchableOpacity style={styles.ctaBtnAccent}>
-                <Text style={styles.ctaBtnTextAccent}>Donate Now</Text>
-              </TouchableOpacity>
+            {/* Team Announcement Card */}
+            <View style={styles.cardAnnouncement}>
+              <Text style={styles.cardTitle}>Team Announcement</Text>
+              <Text style={styles.cardBody}>{feedCards[4].text}</Text>
             </View>
-            {/* Feed posts */}
-            {feedPosts.map(post => (
-              <View key={post.id} style={styles.feedPostCard}>
-                <Text style={styles.feedPostAuthor}>{post.author}</Text>
-                <Text style={styles.feedPostContent}>{post.content}</Text>
-                {post.media && (
-                  post.media.type === 'video' ? (
-                    <View style={styles.feedPostMedia}>
-                      <Text style={{ color: '#388e3c', fontWeight: 'bold' }}>Video attached</Text>
-                    </View>
-                  ) : (
-                    <Image source={{ uri: post.media.uri }} style={styles.feedPostImage} />
-                  )
-                )}
-                <View style={styles.feedPostActions}>
-                  <TouchableOpacity
-                    onPress={() => handleToggleLikePost(post.id)}
-                    style={styles.feedPostActionBtn}
-                  >
-                    <FontAwesome5
-                      name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"}
-                      size={16}
-                      color={likedPosts[post.id] ? "#2e7d32" : "#888"}
-                    />
-                    <Text style={[
-                      styles.feedPostActionText,
-                      likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }
-                    ]}>
-                      {likedPosts[post.id] ? "Liked" : "Like"}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-                {/* Comments */}
-                <View style={styles.feedPostComments}>
-                  {post.comments.map((c, idx) => (
-                    <View key={idx} style={styles.feedPostComment}>
-                      <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
-                      <Text style={styles.feedPostCommentText}>{c.text}</Text>
-                    </View>
-                  ))}
-                  <View style={styles.feedPostCommentInputRow}>
-                    <TextInput
-                      style={styles.feedPostCommentInput}
-                      value={commentInputs[post.id] || ''}
-                      onChangeText={text => setCommentInputs({ ...commentInputs, [post.id]: text })}
-                      placeholder="Write a comment..."
-                    />
-                    <TouchableOpacity onPress={() => handleAddComment(post.id)} style={styles.feedPostCommentBtn}>
-                      <Text style={styles.feedPostCommentBtnText}>Post</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            ))}
-            {/* Spacer */}
             <View style={{ height: 80 }} />
           </ScrollView>
           {/* Floating Compose Button */}
@@ -385,33 +294,87 @@ function DrawerItem({ icon, label, active, onPress }) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#f7fafc' },
+  root: { flex: 1, backgroundColor: '#f3f8f3' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#e8f5e9',
+    backgroundColor: '#2e7d32',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#c8e6c9',
-    justifyContent: 'space-between',
+    borderBottomWidth: 0,
+    justifyContent: 'flex-start',
+  },
+  headerCenter: {
+    flex: 1,
+    alignItems: 'center',
   },
   headerTitle: {
     fontSize: 22,
     fontWeight: 'bold',
-    color: '#2e7d32',
+    color: '#fff',
     textAlign: 'center',
   },
+  hamburgerBtn: {
+    padding: 4,
+    marginRight: 16,
+  },
+  headerNotifBtn: {
+    padding: 4,
+  },
   feed: { padding: 16, paddingBottom: 32 },
-  card: {
-    backgroundColor: '#fff',
+  cardOpportunity: {
+    backgroundColor: '#1976d2',
     borderRadius: 16,
     padding: 20,
     marginBottom: 18,
-    elevation: 2,
+    shadowColor: '#1976d2',
+    shadowOpacity: 0.10,
+    shadowRadius: 8,
   },
-  cardAccent: {
-    backgroundColor: '#c8e6c9',
+  cardSchedule: {
+    backgroundColor: '#43a047',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+    shadowColor: '#388e3c',
+    shadowOpacity: 0.10,
+    shadowRadius: 8,
+  },
+  cardImpact: {
+    backgroundColor: '#fffde7',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+    borderLeftWidth: 6,
+    borderLeftColor: '#ffb300',
+    shadowColor: '#ffb300',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+  },
+  cardMilestone: {
+    backgroundColor: '#e3f2fd',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+    borderLeftWidth: 6,
+    borderLeftColor: '#1976d2',
+    shadowColor: '#1976d2',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+  },
+  cardAnnouncement: {
+    backgroundColor: '#e8f5e9',
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 18,
+    borderLeftWidth: 6,
+    borderLeftColor: '#43a047',
+    shadowColor: '#388e3c',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+  },
+  card: {
+    backgroundColor: '#fff',
     borderRadius: 16,
     padding: 20,
     marginBottom: 18,
@@ -420,35 +383,23 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#2e7d32',
+    color: '#fff',
     marginBottom: 8,
   },
   cardBody: {
     fontSize: 15,
-    color: '#333',
+    color: '#fff',
     marginBottom: 8,
   },
   ctaBtn: {
-    backgroundColor: '#2e7d32',
+    backgroundColor: '#fff',
     borderRadius: 8,
     paddingVertical: 10,
     alignItems: 'center',
     marginTop: 8,
   },
   ctaBtnText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
-  ctaBtnAccent: {
-    backgroundColor: '#ff9800',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  ctaBtnTextAccent: {
-    color: '#fff',
+    color: '#1976d2',
     fontWeight: 'bold',
     fontSize: 15,
   },

@@ -59,7 +59,7 @@ export default function AdminDashboard({ userData, onLogout }) {
       {/* Sidebar */}
       <View style={[styles.sidebar, sidebarCollapsed && styles.sidebarCollapsed]}>
         <TouchableOpacity style={styles.sidebarCollapseBtn} onPress={() => setSidebarCollapsed(!sidebarCollapsed)}>
-          <MaterialIcons name={sidebarCollapsed ? "chevron-right" : "chevron-left"} size={28} color="#2e7d32" />
+          <MaterialIcons name={sidebarCollapsed ? "chevron-right" : "chevron-left"} size={28} color="#fff" />
         </TouchableOpacity>
         <ScrollView>
           {sidebarOptions.map(opt => (
@@ -68,7 +68,7 @@ export default function AdminDashboard({ userData, onLogout }) {
                 style={[styles.sidebarItem, activeSection === opt.label && styles.sidebarItemActive]}
                 onPress={() => setActiveSection(opt.label)}
               >
-                <FontAwesome5 name={opt.icon} size={18} color={activeSection === opt.label ? "#fff" : "#2e7d32"} style={{ marginRight: 14 }} />
+                <FontAwesome5 name={opt.icon} size={18} color={activeSection === opt.label ? "#fff" : "#fff"} style={{ marginRight: 14 }} />
                 {!sidebarCollapsed && <Text style={[styles.sidebarItemText, activeSection === opt.label && styles.sidebarItemTextActive]}>{opt.label}</Text>}
               </TouchableOpacity>
               {/* Render sub-items if any and sidebar is not collapsed */}
@@ -76,7 +76,7 @@ export default function AdminDashboard({ userData, onLogout }) {
                 <View style={styles.sidebarSubMenu}>
                   {opt.sub.map(sub => (
                     <TouchableOpacity key={sub.label} style={styles.sidebarSubItem}>
-                      <FontAwesome5 name={sub.icon} size={14} color="#388e3c" style={{ marginRight: 10 }} />
+                      <FontAwesome5 name={sub.icon} size={14} color="#fff" style={{ marginRight: 10 }} />
                       <Text style={styles.sidebarSubItemText}>{sub.label}</Text>
                     </TouchableOpacity>
                   ))}
@@ -91,15 +91,15 @@ export default function AdminDashboard({ userData, onLogout }) {
         {/* Top Header Bar */}
         <View style={styles.headerBar}>
           <View style={styles.headerLeft}>
-            <FontAwesome5 name="search" size={18} color="#888" style={{ marginRight: 8 }} />
-            <TextInput placeholder="Search..." style={styles.searchInput} placeholderTextColor="#888" />
+            <FontAwesome5 name="search" size={18} color="#fff" style={{ marginRight: 8 }} />
+            <TextInput placeholder="Search..." style={styles.searchInput} placeholderTextColor="#fff" />
           </View>
           <View style={styles.headerRight}>
             <TouchableOpacity style={styles.headerNotifBtn}>
-              <FontAwesome5 name="bell" size={20} color="#2e7d32" />
+              <FontAwesome5 name="bell" size={20} color="#fff" />
             </TouchableOpacity>
             <View style={styles.headerProfile}>
-              <FontAwesome5 name="user-shield" size={20} color="#2e7d32" style={{ marginRight: 8 }} />
+              <FontAwesome5 name="user-shield" size={20} color="#fff" style={{ marginRight: 8 }} />
               <Text style={styles.headerProfileText}>{userData.name}</Text>
               <TouchableOpacity onPress={onLogout} style={styles.headerLogoutBtn}>
                 <FontAwesome5 name="sign-out-alt" size={18} color="#e53935" />
@@ -154,10 +154,10 @@ export default function AdminDashboard({ userData, onLogout }) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, flexDirection: 'row', backgroundColor: '#f7fafc' },
+  root: { flex: 1, flexDirection: 'row', backgroundColor: '#f3f8f3' },
   sidebar: {
     width: 220,
-    backgroundColor: '#e8f5e9',
+    backgroundColor: '#2e7d32',
     borderRightWidth: 1,
     borderRightColor: '#c8e6c9',
     paddingTop: 12,
@@ -187,11 +187,11 @@ const styles = StyleSheet.create({
   },
   sidebarItemText: {
     fontSize: 16,
-    color: '#2e7d32',
+    color: '#fff',
     fontWeight: 'bold',
   },
   sidebarItemTextActive: {
-    color: '#fff',
+    color: '#ffeb3b',
   },
   sidebarSubMenu: {
     marginLeft: 24,
@@ -204,17 +204,17 @@ const styles = StyleSheet.create({
   },
   sidebarSubItemText: {
     fontSize: 15,
-    color: '#388e3c',
+    color: '#fff',
   },
   mainArea: {
     flex: 1,
     flexDirection: 'column',
-    backgroundColor: '#f7fafc',
+    backgroundColor: '#f3f8f3',
   },
   headerBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: '#2e7d32',
     borderBottomWidth: 1,
     borderBottomColor: '#c8e6c9',
     paddingHorizontal: 24,
@@ -229,15 +229,15 @@ const styles = StyleSheet.create({
     marginRight: 16,
   },
   searchInput: {
-    backgroundColor: '#f7fafc',
+    backgroundColor: '#388e3c',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 6,
     fontSize: 15,
     flex: 1,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
-    color: '#333',
+    borderColor: '#388e3c',
+    color: '#fff',
   },
   headerRight: {
     flexDirection: 'row',
@@ -250,14 +250,14 @@ const styles = StyleSheet.create({
   headerProfile: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#e8f5e9',
+    backgroundColor: '#388e3c',
     borderRadius: 18,
     paddingVertical: 6,
     paddingHorizontal: 14,
   },
   headerProfileText: {
     fontWeight: 'bold',
-    color: '#2e7d32',
+    color: '#fff',
     marginRight: 8,
     fontSize: 15,
   },
