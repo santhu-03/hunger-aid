@@ -47,11 +47,13 @@
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import { addDoc, collection, getFirestore, Timestamp } from 'firebase/firestore';
 import React, { useState } from 'react';
-import { ActivityIndicator, Alert, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
+import { app } from '../firebaseConfig';
 
-export default function DonationScreen() {
+export default function DonationScreen({ navigation }) {
   const [foodItem, setFoodItem] = useState('');
   const [foodType, setFoodType] = useState('Cooked');
   const [timePrepared, setTimePrepared] = useState(new Date());
@@ -62,6 +64,10 @@ export default function DonationScreen() {
   const [photoUri, setPhotoUri] = useState(null);
   const [locationInfo, setLocationInfo] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [beneficiaries, setBeneficiaries] = useState([]); // List of beneficiaries sorted by distance
+  const [selectedBeneficiary, setSelectedBeneficiary] = useState(null); // The beneficiary selected by donor
+  const [showBeneficiaryModal, setShowBeneficiaryModal] = useState(false);
+  const db = getFirestore(app);
 
   // Handlers
   const handleChoosePhoto = async () => {
@@ -87,19 +93,32 @@ export default function DonationScreen() {
       }
       let loc = await Location.getCurrentPositionAsync({});
       let addr = await Location.reverseGeocodeAsync(loc.coords);
-      setLocationInfo({
+      const info = {
         coords: loc.coords,
         address: addr && addr[0]
           ? `${addr[0].name || ''} ${addr[0].street || ''}, ${addr[0].city || ''}, ${addr[0].region || ''}`
           : `Lat: ${loc.coords.latitude}, Lon: ${loc.coords.longitude}`
-      });
+      };
+      setLocationInfo(info);
+
+      // Fetch sorted beneficiaries from backend API
+      const apiUrl = `https://us-central1-hungeraid-60fb6.cloudfunctions.net/getNearestBeneficiaries?latitude=${loc.coords.latitude}&longitude=${loc.coords.longitude}`;
+      const resp = await fetch(apiUrl);
+      const data = await resp.json();
+      if (data.beneficiaries && Array.isArray(data.beneficiaries)) {
+        setBeneficiaries(data.beneficiaries);
+        setShowBeneficiaryModal(true); // Show modal to pick beneficiary
+      } else {
+        setBeneficiaries([]);
+        Alert.alert('No beneficiaries found nearby.');
+      }
     } catch (e) {
-      Alert.alert('Error', 'Could not fetch location.');
+      Alert.alert('Error', 'Could not fetch location or beneficiaries.');
     }
     setIsLoading(false);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!foodItem.trim()) {
       Alert.alert('Validation', 'Please enter the food item.');
       return;
@@ -116,17 +135,40 @@ export default function DonationScreen() {
       Alert.alert('Validation', 'Please provide your location.');
       return;
     }
-    const donationData = {
-      foodItem,
-      foodType,
-      timePrepared: foodType === 'Cooked' ? timePrepared : null,
-      quantity: Number(quantity),
-      photoUri,
-      locationInfo,
-    };
-    console.log('Donation Submitted:', donationData);
-    Alert.alert('Success', 'Your donation has been posted!');
-    // Optionally reset form here
+    if (!selectedBeneficiary) {
+      Alert.alert('Validation', 'Please select a beneficiary.');
+      return;
+    }
+
+    // Ask user to confirm posting to this beneficiary
+    let gmapsUrl = '';
+    if (selectedBeneficiary.location && selectedBeneficiary.location.latitude && selectedBeneficiary.location.longitude) {
+      gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${selectedBeneficiary.location.latitude},${selectedBeneficiary.location.longitude}`;
+    }
+    Alert.alert(
+      'Confirm Donation',
+      `Name: ${selectedBeneficiary.name || 'N/A'}\nAddress: ${selectedBeneficiary.address || 'N/A'}\nDistance: ${selectedBeneficiary.distance.toFixed(2)} km\n${gmapsUrl ? '\nView on Google Maps: ' + gmapsUrl : ''}\n\nDo you want to post this donation to this beneficiary?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Post', onPress: async () => {
+            const offerExpiry = Timestamp.fromMillis(Date.now() + 15 * 60 * 1000);
+            const donationData = {
+              foodItem,
+              foodType,
+              timePrepared: foodType === 'Cooked' ? timePrepared : null,
+              quantity: Number(quantity),
+              photoUri,
+              location: locationInfo ? locationInfo.coords : null,
+              createdAt: new Date().toISOString(),
+              status: 'Offered',
+              offeredTo: selectedBeneficiary.id,
+              offerExpiry
+            };
+            await addDoc(collection(db, 'donations'), donationData);
+            Alert.alert('Success', 'Your donation has been posted!');
+          } }
+      ]
+    );
   };
 
   const handleQuantityChange = (delta) => {
@@ -138,6 +180,50 @@ export default function DonationScreen() {
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.header}>Share a Meal</Text>
+
+      {/* Beneficiary Selection Modal */}
+      <Modal
+        visible={showBeneficiaryModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowBeneficiaryModal(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', alignItems: 'center' }}>
+          <View style={{ backgroundColor: 'white', borderRadius: 10, padding: 20, width: '90%', maxHeight: '80%' }}>
+            <Text style={{ fontWeight: 'bold', fontSize: 18, marginBottom: 10 }}>Select a Beneficiary</Text>
+            <ScrollView style={{ maxHeight: 300 }}>
+              {beneficiaries.length === 0 && <Text>No beneficiaries found nearby.</Text>}
+              {beneficiaries.map((b, idx) => (
+                <TouchableOpacity
+                  key={b.id}
+                  style={{
+                    padding: 12,
+                    backgroundColor: selectedBeneficiary && selectedBeneficiary.id === b.id ? '#e0f7fa' : '#f9f9f9',
+                    borderRadius: 8,
+                    marginBottom: 8,
+                    borderWidth: 1,
+                    borderColor: selectedBeneficiary && selectedBeneficiary.id === b.id ? '#00bcd4' : '#ddd',
+                  }}
+                  onPress={() => {
+                    setSelectedBeneficiary(b);
+                    setShowBeneficiaryModal(false);
+                  }}
+                >
+                  <Text style={{ fontWeight: 'bold' }}>{b.name || 'Beneficiary'}</Text>
+                  <Text style={{ color: '#555' }}>{b.address}</Text>
+                  <Text style={{ color: '#888', fontSize: 12 }}>Distance: {b.distance.toFixed(2)} km</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={{ marginTop: 10, alignSelf: 'flex-end' }}
+              onPress={() => setShowBeneficiaryModal(false)}
+            >
+              <Text style={{ color: '#00bcd4', fontWeight: 'bold' }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Food Item */}
       <Text style={styles.label}>Food Item</Text>
@@ -279,6 +365,53 @@ export default function DonationScreen() {
         </>
       )}
 
+      {/* Show selected beneficiary info if available */}
+      {selectedBeneficiary && (
+        <View style={styles.beneficiaryCard}>
+          <Text style={styles.beneficiaryTitle}>Selected Beneficiary</Text>
+          <Text style={styles.beneficiaryLabel}>Name:</Text>
+          <Text style={styles.beneficiaryValue}>{selectedBeneficiary.name || 'N/A'}</Text>
+          <Text style={styles.beneficiaryLabel}>Address:</Text>
+          <Text style={styles.beneficiaryValue}>{selectedBeneficiary.address || 'N/A'}</Text>
+          <Text style={styles.beneficiaryLabel}>Distance:</Text>
+          <Text style={styles.beneficiaryValue}>{selectedBeneficiary.distance ? selectedBeneficiary.distance.toFixed(2) : 'N/A'} km</Text>
+          {selectedBeneficiary.location && selectedBeneficiary.location.latitude && selectedBeneficiary.location.longitude && (
+            <View style={styles.beneficiaryMapBox}>
+              <MapView
+                style={styles.beneficiaryMap}
+                initialRegion={{
+                  latitude: selectedBeneficiary.location.latitude,
+                  longitude: selectedBeneficiary.location.longitude,
+                  latitudeDelta: 0.005,
+                  longitudeDelta: 0.005,
+                }}
+                region={{
+                  latitude: selectedBeneficiary.location.latitude,
+                  longitude: selectedBeneficiary.location.longitude,
+                  latitudeDelta: 0.005,
+                  longitudeDelta: 0.005,
+                }}
+                scrollEnabled={true}
+                zoomEnabled={true}
+                pitchEnabled={false}
+                rotateEnabled={false}
+              >
+                <Marker
+                  coordinate={{
+                    latitude: selectedBeneficiary.location.latitude,
+                    longitude: selectedBeneficiary.location.longitude,
+                  }}
+                  title={selectedBeneficiary.name || 'Beneficiary'}
+                  description={selectedBeneficiary.address || ''}
+                />
+              </MapView>
+            </View>
+          )}
+        </View>
+      )}
+
+
+
       {/* Submit */}
       <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit}>
         <Text style={styles.submitBtnText}>Post Donation</Text>
@@ -288,6 +421,94 @@ export default function DonationScreen() {
 }
 
 const styles = StyleSheet.create({
+  floatingInfoBtn: {
+    backgroundColor: '#1976d2',
+    borderRadius: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    alignSelf: 'center',
+    marginTop: 18,
+    marginBottom: 8,
+    elevation: 3,
+  },
+  floatingInfoBtnText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  floatingModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  floatingModalCard: {
+    width: '90%',
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    padding: 20,
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#1976d2',
+    shadowOpacity: 0.18,
+    shadowRadius: 12,
+  },
+  floatingModalCloseBtn: {
+    marginTop: 16,
+    backgroundColor: '#388e3c',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 32,
+  },
+  floatingModalCloseBtnText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  beneficiaryCard: {
+    marginTop: 16,
+    marginBottom: 8,
+    padding: 16,
+    backgroundColor: '#e8f5e9',
+    borderRadius: 14,
+    borderLeftWidth: 6,
+    borderLeftColor: '#43a047',
+    shadowColor: '#388e3c',
+    shadowOpacity: 0.10,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  beneficiaryTitle: {
+    fontWeight: 'bold',
+    color: '#1976d2',
+    fontSize: 18,
+    marginBottom: 8,
+  },
+  beneficiaryLabel: {
+    color: '#388e3c',
+    fontWeight: 'bold',
+    marginTop: 4,
+  },
+  beneficiaryValue: {
+    color: '#333',
+    marginBottom: 2,
+    fontSize: 15,
+  },
+  beneficiaryMapBox: {
+    marginTop: 10,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#1976d2',
+    backgroundColor: '#e3f2fd',
+    height: 140,
+    width: '100%',
+  },
+  beneficiaryMap: {
+    flex: 1,
+    minHeight: 140,
+    borderRadius: 12,
+  },
   container: {
     padding: 22,
     backgroundColor: '#f7fafc',

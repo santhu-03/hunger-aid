@@ -131,14 +131,34 @@ export default function App() {
       setErrorMsg('Please enter both email and password.');
       return;
     }
+    // Prompt for location
+    let latitude = null;
+    let longitude = null;
+    if (role === 'Donor' || role === 'Volunteer' || role === 'Admin' || role === 'Beneficiary') {
+      try {
+        const { status } = await (await import('expo-location')).requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setErrorMsg('Location permission is required for registration.');
+          return;
+        }
+        const loc = await (await import('expo-location')).getCurrentPositionAsync({});
+        latitude = loc.coords.latitude;
+        longitude = loc.coords.longitude;
+      } catch (e) {
+        setErrorMsg('Could not get location.');
+        return;
+      }
+    }
     setPending(true);
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const { user } = userCredential;
       await setDoc(doc(db, 'users', user.uid), {
+        uid: user.uid,
         name,
         email,
         role,
+        location: latitude && longitude ? { latitude, longitude } : null,
         createdAt: serverTimestamp(),
       });
     } catch (e) {
@@ -363,7 +383,7 @@ export default function App() {
       </Modal>
       {/* Donation Screen - Example usage */}
       {user && userData && userData.role === 'Donor' && (
-        <DonationScreen />
+        <DonationScreen navigation={null} />
       )}
     </View>
   );

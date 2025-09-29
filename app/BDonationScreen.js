@@ -64,17 +64,18 @@
 // - The "Accept" button should have a strong, positive background color (e.g., #28a745).
 // - The "Decline" button should have a secondary or negative color (e.g., #6c757d or #dc3545).
 
+import * as Location from 'expo-location';
+import { getAuth } from 'firebase/auth';
+import { collection, doc, getDoc, getFirestore, onSnapshot, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
-import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-// Helper to format seconds as MM:SS
 function formatTime(secs) {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
-// Helper to get relative time string
 function getRelativeTime(isoString) {
   const prepared = new Date(isoString);
   const now = new Date();
@@ -85,21 +86,199 @@ function getRelativeTime(isoString) {
   return `Prepared ${diffMin} minutes ago`;
 }
 
-export default function BDonationScreen({ donationDetails, onAccept, onDecline }) {
-  const [timeLeft, setTimeLeft] = useState(900);
 
+
+
+export default function BDonationScreen(props) {
+  // All hooks must be at the top, before any return
+  const [isLocating, setIsLocating] = useState(false);
+  const [locationStatus, setLocationStatus] = useState('');
+  const [donationDetails, setDonationDetails] = useState(null);
+  const [loadingDonation, setLoadingDonation] = useState(true);
+  // Timer state always declared, but only used if donationDetails exists
+  const [timeLeft, setTimeLeft] = useState(900);
+  const auth = getAuth();
+  const currentUser = auth ? auth.currentUser : null;
+  const db = getFirestore();
+
+  // Real-time listener for new donation offers
   useEffect(() => {
-    if (timeLeft <= 0) {
-      onDecline && onDecline(donationDetails.id);
+    if (!currentUser || !currentUser.uid) return;
+    const q = query(
+      collection(db, 'donations'),
+      where('offeredTo', '==', currentUser.uid),
+      where('status', '==', 'Offered')
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      if (!snapshot.empty) {
+        // Show the first offer (or you can handle multiple)
+        const docData = snapshot.docs[0].data();
+        // Debug: print offerExpiry value and type
+        console.log('BDonationScreen: Found offer:', {
+          id: snapshot.docs[0].id,
+          offerExpiry: docData.offerExpiry,
+          offerExpiryType: typeof docData.offerExpiry,
+          offerExpiryToMillis: docData.offerExpiry && docData.offerExpiry.toMillis ? docData.offerExpiry.toMillis() : null,
+          now: Date.now(),
+          nowISO: new Date().toISOString(),
+          ...docData
+        });
+        setDonationDetails({ id: snapshot.docs[0].id, ...docData });
+      } else {
+        console.log('BDonationScreen: No offers found for this beneficiary.');
+        setDonationDetails(null);
+      }
+      setLoadingDonation(false);
+    });
+    return () => unsubscribe();
+  }, [currentUser]);
+
+  // Countdown timer effect (use Firestore Timestamp for expiry)
+  useEffect(() => {
+    if (!donationDetails || !donationDetails.offerExpiry) return;
+    // Firestore Timestamp: use toMillis()
+    const expiryMs = donationDetails.offerExpiry.toMillis ? donationDetails.offerExpiry.toMillis() : donationDetails.offerExpiry;
+    let initialLeft = Math.max(Math.floor((expiryMs - Date.now()) / 1000), 0);
+    console.log('[TIMER DEBUG]', {
+      expiryMs,
+      now: Date.now(),
+      expiryMinusNow: expiryMs - Date.now(),
+      initialLeft
+    });
+    setTimeLeft(initialLeft);
+    // Only start timer if not already expired
+    if (initialLeft > 0) {
+      let prevLeft = initialLeft;
+      const interval = setInterval(() => {
+        setTimeLeft(t => {
+          const left = Math.max(Math.floor((expiryMs - Date.now()) / 1000), 0);
+          // Only call handleDecline when timer transitions from >0 to 0
+if (left === 0 && prevLeft > 0) {
+  handleDecline('timer reached zero');
+}
+          prevLeft = left;
+          return left;
+        });
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+    // eslint-disable-next-line
+  }, [donationDetails && donationDetails.offerExpiry]);
+
+  // Set beneficiary location in Firestore
+  const handleSetLocation = async () => {
+    setIsLocating(true);
+    setLocationStatus('');
+    try {
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setLocationStatus('Permission denied');
+        setIsLocating(false);
+        Alert.alert('Permission denied', 'Location permission is required.');
+        return;
+      }
+      let loc = await Location.getCurrentPositionAsync({});
+      if (!currentUser || !currentUser.uid) {
+        setLocationStatus('Not authenticated');
+        setIsLocating(false);
+        Alert.alert('Error', 'User not authenticated.');
+        return;
+      }
+      // Only write to users collection
+      const userRef = doc(db, 'users', currentUser.uid);
+      const userSnap = await getDoc(userRef);
+      const userData = {
+        uid: currentUser.uid,
+        email: currentUser.email || '',
+        role: 'Beneficiary',
+        location: {
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude
+        }
+      };
+      if (!userSnap.exists()) {
+        await setDoc(userRef, userData);
+      } else {
+        await updateDoc(userRef, userData);
+      }
+      setLocationStatus('Location updated!');
+      Alert.alert('Success', 'Your location has been updated. Donors can now find you as the nearest beneficiary.');
+    } catch (e) {
+      setLocationStatus('Error updating location');
+      Alert.alert('Error', 'Could not update location.');
+    }
+    setIsLocating(false);
+  };
+
+  if (loadingDonation) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f7fafc' }}>
+        <ActivityIndicator size="large" color="#1976d2" />
+        <Text style={{ marginTop: 12, color: '#1976d2' }}>Checking for new offers...</Text>
+      </View>
+    );
+  }
+
+  if (!donationDetails) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, backgroundColor: '#f7fafc' }}>
+        <Text style={{ fontSize: 22, fontWeight: 'bold', color: '#1976d2', marginBottom: 18 }}>No new aid offers at this time.</Text>
+        <TouchableOpacity style={{ backgroundColor: '#1976d2', padding: 12, borderRadius: 8 }} onPress={handleSetLocation} disabled={isLocating}>
+          <Text style={{ color: '#fff', fontWeight: 'bold' }}>{isLocating ? 'Setting Location...' : 'Set/Update My Location'}</Text>
+        </TouchableOpacity>
+        {isLocating && <ActivityIndicator size="small" color="#1976d2" style={{ marginTop: 6 }} />}
+        {!!locationStatus && <Text style={{ color: locationStatus.includes('Success') ? 'green' : 'red', marginTop: 4 }}>{locationStatus}</Text>}
+        <Text style={{ fontSize: 12, color: '#888', marginTop: 4, textAlign: 'center' }}>Set your location so donors can find you as the nearest beneficiary.</Text>
+      </View>
+    );
+  }
+
+
+
+  // ...existing code...
+
+  const handleAccept = async () => {
+    const donationId = donationDetails?.id;
+    if (!currentUser || !currentUser.uid) {
+      console.error("User not authenticated!");
       return;
     }
-    const interval = setInterval(() => {
-      setTimeLeft(t => t > 0 ? t - 1 : 0);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [timeLeft, onDecline, donationDetails.id]);
+    if (!donationId) {
+      console.error("Donation ID is missing!");
+      return;
+    }
+    const docRef = doc(db, 'donations', donationId);
+    try {
+      await updateDoc(docRef, {
+        status: 'Accepted',
+        beneficiaryId: currentUser.uid
+      });
+      if (props.onAccept) props.onAccept(donationId);
+    } catch (error) {
+      console.error("Error during update:", error);
+    }
+  };
 
-  // Timer color logic
+ const handleDecline = async (reason = '') => {
+  const donationId = donationDetails?.id;
+  console.log('[DECLINE DEBUG] handleDecline called', { donationId, reason, now: Date.now(), nowISO: new Date().toISOString(), offerExpiry: donationDetails?.offerExpiry });
+  if (!donationId) {
+    console.error("Error: Document ID is undefined!");
+    return;
+  }
+  const donationRef = doc(db, 'donations', donationId);
+  try {
+    await updateDoc(donationRef, {
+      status: 'Pending',
+      offeredTo: null,
+      offerExpiry: null
+    });
+    if (props.onDecline) props.onDecline(donationId);
+  } catch (error) {
+    console.error("Error during decline update:", error);
+  }
+};
+
   let timerColor = '#ff9800';
   if (timeLeft <= 60) timerColor = '#dc3545';
   else if (timeLeft <= 180) timerColor = '#ffb300';
@@ -107,9 +286,19 @@ export default function BDonationScreen({ donationDetails, onAccept, onDecline }
   return (
     <View style={styles.container}>
       <Text style={styles.title}>New Donation Available!</Text>
+      {/* Set Location UI */}
+      <View style={{ marginBottom: 16, alignItems: 'center' }}>
+        <TouchableOpacity style={{ backgroundColor: '#1976d2', padding: 12, borderRadius: 8 }} onPress={handleSetLocation} disabled={isLocating}>
+          <Text style={{ color: '#fff', fontWeight: 'bold' }}>{isLocating ? 'Setting Location...' : 'Set/Update My Location'}</Text>
+        </TouchableOpacity>
+        {isLocating && <ActivityIndicator size="small" color="#1976d2" style={{ marginTop: 6 }} />}
+        {!!locationStatus && <Text style={{ color: locationStatus.includes('Success') ? 'green' : 'red', marginTop: 4 }}>{locationStatus}</Text>}
+        <Text style={{ fontSize: 12, color: '#888', marginTop: 4, textAlign: 'center' }}>Set your location so donors can find you as the nearest beneficiary.</Text>
+      </View>
       <Text style={[styles.timer, { color: timerColor }]}>
-        Time Remaining: {formatTime(timeLeft)}
+        Time left: {formatTime(timeLeft)}
       </Text>
+      <Text style={styles.foodItemText}>{donationDetails.foodItem}</Text>
       <Image source={{ uri: donationDetails.photoUri }} style={styles.foodImage} />
       <View style={styles.detailsCard}>
         <Text style={styles.foodName}>{donationDetails.foodItem}</Text>
@@ -128,22 +317,21 @@ export default function BDonationScreen({ donationDetails, onAccept, onDecline }
       </View>
       <View style={styles.locationSection}>
         <Text style={styles.locationText}>
-          Just {donationDetails.distance} km away from you
+          {donationDetails.distance ? `Just ${donationDetails.distance} km away from you` : ''}
         </Text>
-        {/* Optional: Add a static map preview here if desired */}
       </View>
       <View style={styles.actionsRow}>
         <TouchableOpacity
           style={styles.acceptBtn}
-          onPress={() => onAccept && onAccept(donationDetails.id)}
+          onPress={handleAccept}
         >
           <Text style={styles.acceptBtnText}>Accept</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.declineBtn}
-          onPress={() => onDecline && onDecline(donationDetails.id)}
+         onPress={() => handleDecline('manual button press')}
         >
-          <Text style={styles.declineBtnText}>Decline</Text>
+           <Text style={styles.declineBtnText}>Decline</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -169,8 +357,15 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: 'bold',
     textAlign: 'center',
-    marginBottom: 16,
+    marginBottom: 10,
     letterSpacing: 1,
+  },
+  foodItemText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#2e7d32',
+    textAlign: 'center',
+    marginBottom: 8,
   },
   foodImage: {
     width: '100%',

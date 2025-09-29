@@ -1,0 +1,43 @@
+Here is the prompt to create the real-time workflow you described.
+
+Objective: Refactor the donation process so that when a donor posts a new food donation, it is immediately offered to the single nearest beneficiary and appears in their "Aid Status."
+
+Part 1: Backend Logic (in functions/index.js)
+Create a Cloud Function named onDonationCreate that automatically processes new donations.
+
+Trigger: The function must activate when a new document is created in the donations collection.
+
+Get Data: Extract the new donation's pickupLocation.
+
+Find Nearest Beneficiary:
+
+Query the users collection for all users with role: 'beneficiary'.
+
+In the function's code, calculate the distance from the donation to each beneficiary to find the single nearest one.
+
+Assign the Offer: Update the new donation document in Firestore with the following fields:
+
+status: 'Offered'
+
+offeredTo: 'NEAREST_BENEFICIARY_ID'
+
+offerExpiry: <A timestamp 15 minutes from now>
+
+Part 2: Frontend Listener (in BeneficiaryDashboard.js or your Aid Status screen)
+Set up a real-time Firestore listener that updates the "Aid Status" when an offer is received.
+
+Use useEffect: Create a listener that starts when the component mounts.
+
+Add Guard Clause: Ensure the currentUser.uid is available before creating the query to prevent errors.
+
+Create the Query: The listener must query the donations collection for any documents where:
+
+status is equal to 'Offered'
+
+offeredTo is equal to the currentUser.uid
+
+Use onSnapshot:
+
+When the listener receives data, update a local state variable (e.g., setPendingOffer(data)).
+
+Your "Aid Status" UI should be designed to read from this state. If pendingOffer is not null, it should display the details of the new offer and provide "Accept" / "Decline" buttons.

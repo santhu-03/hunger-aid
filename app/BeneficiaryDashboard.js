@@ -1,6 +1,10 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
-import React, { useState } from 'react';
+import { useNavigation } from '@react-navigation/native';
+import { getAuth } from 'firebase/auth';
+import { collection, getFirestore, onSnapshot, query, where } from 'firebase/firestore';
+import React, { useEffect, useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { app } from '../firebaseConfig'; // adjust path as needed
 import BeneficiaryProfile from '../profile/BeneficiaryProfile';
 import BDonationScreen from './BDonationScreen';
 
@@ -21,6 +25,7 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
   const [profilePic, setProfilePic] = useState(userData.profilePic || null);
   const [firstName, setFirstName] = useState(userData.name ? userData.name.split(' ')[0] : '');
   const [lastName, setLastName] = useState(userData.name ? userData.name.split(' ')[1] || '' : '');
+  const [pendingOffer, setPendingOffer] = useState(null);
 
   // Use donor-style feed cards
   const feedCards = [
@@ -74,6 +79,32 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
   ]);
   const [commentInputs, setCommentInputs] = useState({});
   const [likedPosts, setLikedPosts] = useState({});
+  const [offerModal, setOfferModal] = useState(null);
+  const navigation = useNavigation();
+  const db = getFirestore(app);
+
+  useEffect(() => {
+    // Use the authenticated user for real-time offer listening
+    const auth = getAuth();
+    const currentUser = auth.currentUser;
+    if (!currentUser || !currentUser.uid) return;
+
+    const db = getFirestore(app);
+    const q = query(
+      collection(db, 'donations'),
+      where('status', '==', 'Offered'),
+      where('offeredTo', '==', currentUser.uid)
+    );
+    const unsub = onSnapshot(q, (snapshot) => {
+      if (!snapshot.empty) {
+        const doc = snapshot.docs[0];
+        setPendingOffer({ ...doc.data(), id: doc.id });
+      } else {
+        setPendingOffer(null);
+      }
+    });
+    return () => unsub();
+  }, [userData]);
 
   const handleOpenPostModal = () => {
     setShowPostModal(true);
@@ -180,15 +211,16 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
         />
       ) : activeMenu === 'My Aid Status' ? (
         <BDonationScreen
-          donationDetails={sampleDonationDetails}
+          donationDetails={pendingOffer}
+          noOffer={!pendingOffer}
           onAccept={id => {
-            // handle accept logic here
             alert('Accepted donation: ' + id);
+            setPendingOffer(null);
             setActiveMenu('Home');
           }}
           onDecline={id => {
-            // handle decline logic here
             alert('Declined donation: ' + id);
+            setPendingOffer(null);
             setActiveMenu('Home');
           }}
         />
@@ -396,6 +428,44 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
               <FontAwesome5 name="lock" size={20} color="#2e7d32" />
               <Text style={styles.drawerLogoutText}>Logout</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+      {/* Offer Modal */}
+      <Modal visible={!!offerModal} transparent animationType="slide">
+        <View style={{
+          flex: 1, backgroundColor: 'rgba(0,0,0,0.3)', justifyContent: 'center', alignItems: 'center'
+        }}>
+          <View style={{
+            backgroundColor: '#fff', borderRadius: 16, padding: 24, width: '85%', alignItems: 'center'
+          }}>
+            <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#1976d2', marginBottom: 12 }}>
+              New Food Donation Available!
+            </Text>
+            {offerModal && (
+              <>
+                <Text style={{ fontSize: 16, color: '#333', marginBottom: 8 }}>
+                  A donation of <Text style={{ fontWeight: 'bold' }}>{offerModal.foodItem}</Text> is available nearby.
+                </Text>
+                <Text style={{ fontSize: 14, color: '#888', marginBottom: 18 }}>
+                  You have 15 minutes to respond.
+                </Text>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#28a745', borderRadius: 8, paddingVertical: 12, paddingHorizontal: 32, marginBottom: 10
+                  }}
+                  onPress={() => {
+                    setOfferModal(null);
+                    navigation.navigate('BDonationScreen', { donationDetails: offerModal });
+                  }}
+                >
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>View Offer</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setOfferModal(null)}>
+                  <Text style={{ color: '#1976d2', fontWeight: 'bold', fontSize: 15 }}>Dismiss</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </View>
       </Modal>

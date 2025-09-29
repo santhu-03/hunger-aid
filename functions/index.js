@@ -1,3 +1,13 @@
+// Import all dependencies at the top
+const { onRequest } = require("firebase-functions/v2/https");
+const {onDocumentCreated, onDocumentUpdated} = require("firebase-functions/v2/firestore");
+const {initializeApp} = require("firebase-admin/app");
+const {getFirestore, FieldValue, Timestamp} = require("firebase-admin/firestore");
+const {getMessaging} = require("firebase-admin/messaging");
+
+// Initialize the Firebase Admin SDK
+initializeApp();
+
 // HTTP function: Get beneficiaries sorted by distance from donor
 exports.getNearestBeneficiaries = onRequest(async (req, res) => {
   try {
@@ -32,21 +42,12 @@ exports.getNearestBeneficiaries = onRequest(async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
-// Simple HTTP test function to confirm deployment and logging
-const { onRequest } = require("firebase-functions/v2/https");
 
+// Simple HTTP test function to confirm deployment and logging
 exports.testHttpFunction = onRequest((req, res) => {
   console.log("[HTTP TEST] testHttpFunction was called at", new Date().toISOString());
   res.status(200).send("Cloud Function is working!");
 });
-// Import specific v2 functions and Firebase Admin modules
-const {onDocumentCreated, onDocumentUpdated} = require("firebase-functions/v2/firestore");
-const {initializeApp} = require("firebase-admin/app");
-const {getFirestore, FieldValue, Timestamp} = require("firebase-admin/firestore");
-const {getMessaging} = require("firebase-admin/messaging");
-
-// Initialize the Firebase Admin SDK
-initializeApp();
 
 // Helper: Calculate distance between two lat/lng points (Haversine formula)
 function getDistanceKm(lat1, lon1, lat2, lon2) {

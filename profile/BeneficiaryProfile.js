@@ -1,7 +1,10 @@
 import { FontAwesome5 } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+
+import * as Location from 'expo-location';
+import { doc, getFirestore, updateDoc } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
-import { Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 export default function BeneficiaryProfile({ userData, onSave, onClose }) {
   const [mode, setMode] = useState('view');
@@ -32,7 +35,21 @@ export default function BeneficiaryProfile({ userData, onSave, onClose }) {
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    let latitude = null;
+    let longitude = null;
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission denied', 'Location permission is required to update your profile location.');
+      } else {
+        const loc = await Location.getCurrentPositionAsync({});
+        latitude = loc.coords.latitude;
+        longitude = loc.coords.longitude;
+      }
+    } catch (e) {
+      // ignore location error, allow profile update without location
+    }
     if (onSave) {
       onSave({
         name: `${firstName} ${lastName}`,
@@ -49,6 +66,18 @@ export default function BeneficiaryProfile({ userData, onSave, onClose }) {
         profilePic,
       });
     }
+    // Update Firestore users collection with uid, role, and location
+    try {
+      const db = getFirestore();
+      const userRef = doc(db, 'users', userData.uid);
+      await updateDoc(userRef, {
+        uid: userData.uid,
+        role: 'Beneficiary',
+        location: latitude && longitude ? { latitude, longitude } : null,
+      });
+    } catch (e) {
+      // ignore Firestore error, allow profile update
+    }
     setMode('view');
     setShowToast(true);
     setTimeout(() => setShowToast(false), 2000);
@@ -64,6 +93,7 @@ export default function BeneficiaryProfile({ userData, onSave, onClose }) {
     <ScrollView contentContainerStyle={styles.profileScroll}>
       <View style={styles.profileModalContent}>
         <Text style={styles.profileModalTitle}>Profile</Text>
+
         {/* Personal Identity Card */}
         <View style={styles.profileCard}>
           <View style={styles.profilePicFrame}>
