@@ -2,6 +2,7 @@ import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import React, { useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import BeneficiaryProfile from '../profile/BeneficiaryProfile';
+import BDonationScreen from './BDonationScreen';
 
 const beneficiaryMenuOptions = [
   { icon: "home", label: "Home" },
@@ -145,6 +146,17 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     Object.assign(userData, updatedData);
   };
 
+  // Add a sample donationDetails for demo/testing
+  const sampleDonationDetails = {
+    id: 'don_123',
+    foodItem: 'Vegetable Biryani',
+    quantity: 10,
+    foodType: 'Cooked',
+    timePrepared: '2025-09-29T11:15:00.000Z',
+    photoUri: 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=600&q=80',
+    distance: 2.1,
+  };
+
   return (
     <View style={styles.root}>
       {/* Header */}
@@ -165,6 +177,20 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
           userData={userData}
           onSave={handleProfileSave}
           onClose={() => setActiveMenu('Home')}
+        />
+      ) : activeMenu === 'My Aid Status' ? (
+        <BDonationScreen
+          donationDetails={sampleDonationDetails}
+          onAccept={id => {
+            // handle accept logic here
+            alert('Accepted donation: ' + id);
+            setActiveMenu('Home');
+          }}
+          onDecline={id => {
+            // handle decline logic here
+            alert('Declined donation: ' + id);
+            setActiveMenu('Home');
+          }}
         />
       ) : (
         <ScrollView contentContainerStyle={styles.feed}>

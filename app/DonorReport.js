@@ -63,6 +63,7 @@ import { Picker } from '@react-native-picker/picker';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Dimensions, Image, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { BarChart, PieChart } from 'react-native-chart-kit';
+import { useTheme } from './DonorDashboard';
 
 const MOCK_DONATIONS = [
   { id: '1', amount: 2000, date: '2024-01-15', campaign: 'Education Kits' },
@@ -89,6 +90,8 @@ function getMonth(dateStr) {
 }
 
 export default function DonorReportScreen() {
+  const { currentTheme } = useTheme();
+  const isDark = currentTheme === 'dark';
   const [isLoading, setIsLoading] = useState(true);
   const [timeRange, setTimeRange] = useState('thisYear');
   const [allDonations, setAllDonations] = useState([]);
@@ -165,8 +168,8 @@ export default function DonorReportScreen() {
   const screenWidth = Dimensions.get('window').width - 32;
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 }}>
-      <Text style={styles.title}>Your Impact Report</Text>
+    <ScrollView style={[styles.container, isDark && { backgroundColor: '#181a20' }]} contentContainerStyle={{ paddingBottom: 32 }}>
+      <Text style={[styles.title, isDark && { color: '#fff' }]}>Your Impact Report</Text>
       <View style={styles.picker}>
         <Picker
           selectedValue={timeRange}
@@ -198,8 +201,8 @@ export default function DonorReportScreen() {
             </View>
           </View>
           {/* Bar Chart */}
-          <View style={styles.chartContainer}>
-            <Text style={styles.subheading}>Your Giving Over Time</Text>
+          <View style={[styles.chartContainer, isDark && { backgroundColor: '#23262f' }]}>
+            <Text style={[styles.subheading, isDark && { color: '#fff' }]}>Your Giving Over Time</Text>
             <BarChart
               data={reportData.barChart}
               width={screenWidth}
@@ -221,8 +224,8 @@ export default function DonorReportScreen() {
             />
           </View>
           {/* Pie Chart */}
-          <View style={styles.chartContainer}>
-            <Text style={styles.subheading}>Donations by Cause</Text>
+          <View style={[styles.chartContainer, isDark && { backgroundColor: '#23262f' }]}>
+            <Text style={[styles.subheading, isDark && { color: '#fff' }]}>Donations by Cause</Text>
             <PieChart
               data={reportData.pieChart}
               width={screenWidth}
@@ -238,13 +241,13 @@ export default function DonorReportScreen() {
             />
           </View>
           {/* Featured Impact */}
-          <View style={styles.featuredStoryCard}>
-            <Text style={styles.featuredTitle}>Your Donations in Action</Text>
+          <View style={[styles.featuredStoryCard, isDark && { backgroundColor: '#23262f' }]}>
+            <Text style={[styles.featuredTitle, isDark && { color: '#fff' }]}>Your Donations in Action</Text>
             <Image
               source={{ uri: 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=600&q=80' }}
               style={styles.featuredImage}
             />
-            <Text style={styles.featuredText}>
+            <Text style={[styles.featuredText, isDark && { color: '#fff' }]}>
               Your contribution to <Text style={{ fontWeight: 'bold', color: '#1976d2' }}>'Education Kits'</Text> helped 50 children start their school year with all the necessary supplies.
             </Text>
           </View>

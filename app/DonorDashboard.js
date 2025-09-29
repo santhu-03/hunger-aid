@@ -1,13 +1,26 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { Appearance, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import DonorProfile from '../profile/DonorProfile';
+import CampaignsScreen from './camp';
 import DonationScreen from './DonationScreen';
 import DonationHistoryScreen from './donorhistory';
 import DonorReportScreen from './DonorReport';
 import DonorSettingsScreen from './donorsettings';
+import NotificationsScreen from './NotificationsScreen';
 import TrackDonationScreen from './TrackDonor';
+
+// Move ThemeContext and useTheme to a separate file for a real app, but keep here for now
+export const ThemeContext = createContext({
+  theme: 'system',
+  currentTheme: 'light',
+  setTheme: () => {},
+});
+
+export function useTheme() {
+  return useContext(ThemeContext);
+}
 
 export default function DonorDashboard({ userData, onLogout }) {
   const [menuVisible, setMenuVisible] = useState(false);
@@ -30,6 +43,31 @@ export default function DonorDashboard({ userData, onLogout }) {
   const [showPostModal, setShowPostModal] = useState(false);
   const [commentInputs, setCommentInputs] = useState({}); // { postId: commentText }
   const [likedPosts, setLikedPosts] = useState({}); // { postId: true/false }
+  const [theme, setTheme] = useState('system');
+  const [currentTheme, setCurrentTheme] = useState(Appearance.getColorScheme() || 'light');
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  // Listen to system theme changes if 'system' is selected
+  useEffect(() => {
+    if (theme === 'system') {
+      const listener = Appearance.addChangeListener(({ colorScheme }) => {
+        setCurrentTheme(colorScheme || 'light');
+      });
+      setCurrentTheme(Appearance.getColorScheme() || 'light');
+      return () => listener.remove();
+    }
+  }, [theme]);
+
+  // Set theme based on user selection
+  useEffect(() => {
+    if (theme === 'system') {
+      setCurrentTheme(Appearance.getColorScheme() || 'light');
+    } else {
+      setCurrentTheme(theme);
+    }
+  }, [theme]);
+
+  const isDark = currentTheme === 'dark';
 
   // Example data for cards
   const feedCards = [
@@ -161,247 +199,257 @@ export default function DonorDashboard({ userData, onLogout }) {
     }
   };
 
+  const handleNotifBellPress = () => {
+    setShowNotifications((prev) => !prev);
+  };
+
   return (
-    <View style={styles.root}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => setMenuVisible(true)} style={styles.hamburgerBtn}>
-          <MaterialIcons name="menu" size={32} color="#fff" />
-        </TouchableOpacity>
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>Hunger Aid</Text>
+    <ThemeContext.Provider value={{ theme, currentTheme, setTheme }}>
+      <View style={[styles.root, isDark && { backgroundColor: '#181a20' }]}>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => setMenuVisible(true)} style={styles.hamburgerBtn}>
+            <MaterialIcons name="menu" size={32} color="#fff" />
+          </TouchableOpacity>
+          <View style={styles.headerCenter}>
+            <Text style={styles.headerTitle}>Hunger Aid</Text>
+          </View>
+          <TouchableOpacity onPress={handleNotifBellPress} style={styles.headerNotifBtn}>
+            <FontAwesome5 name="bell" size={22} color="#fff" />
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity onPress={() => {}} style={styles.headerNotifBtn}>
-          <FontAwesome5 name="bell" size={22} color="#fff" />
-        </TouchableOpacity>
-      </View>
-      {/* Main Content */}
-      {activeMenu === 'Profile' ? (
-        <DonorProfile
-          userData={userData}
-          onSave={handleProfileSave}
-          onClose={() => setActiveMenu('Home')}
-        />
-      ) : activeMenu === 'Donate' ? (
-        <DonationScreen />
-      ) : activeMenu === 'Track Logistics' ? (
-        <TrackDonationScreen />
-      ) : activeMenu === 'History Overview' ? (
-        <DonationHistoryScreen />
-      ) : activeMenu === 'Impact Reports' ? (
-        <DonorReportScreen />
-      ) : activeMenu === 'Settings' ? (
-        <DonorSettingsScreen />
-      ) : (
-        <ScrollView contentContainerStyle={styles.feed}>
-          {/* Welcome Card */}
-          <View style={styles.cardWelcome}>
-            <Text style={styles.cardWelcomeText}>{feedCards[0].content}</Text>
-          </View>
-          {/* Success Story Card */}
-          <View style={styles.cardSuccess}>
-            {feedCards[1].image ? (
-              <Image source={feedCards[1].image} style={styles.cardImage} />
-            ) : (
-              <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                <Text style={{ color: '#fff' }}>Image</Text>
-              </View>
-            )}
-            <Text style={styles.cardTitle}>Success Story</Text>
-            <Text style={styles.cardBody}>{feedCards[1].story}</Text>
-            <TouchableOpacity style={styles.ctaBtn}>
-              <Text style={styles.ctaBtnText}>Read Full Story</Text>
-            </TouchableOpacity>
-          </View>
-          {/* Project Update Card */}
-          <View style={styles.cardProject}>
-            <Text style={styles.cardTitle}>{feedCards[2].campaign}</Text>
-            <View style={styles.progressBarBg}>
-              <View style={[styles.progressBarFill, { width: `${feedCards[2].progress * 100}%` }]} />
+        {/* Main Content */}
+        {showNotifications ? (
+          <NotificationsScreen />
+        ) : activeMenu === 'Profile' ? (
+          <DonorProfile
+            userData={userData}
+            onSave={handleProfileSave}
+            onClose={() => setActiveMenu('Home')}
+          />
+        ) : activeMenu === 'Donate' ? (
+          <DonationScreen />
+        ) : activeMenu === 'Track Logistics' ? (
+          <TrackDonationScreen />
+        ) : activeMenu === 'History Overview' ? (
+          <DonationHistoryScreen />
+        ) : activeMenu === 'Impact Reports' ? (
+          <DonorReportScreen />
+        ) : activeMenu === 'Settings' ? (
+          <DonorSettingsScreen />
+        ) : activeMenu === 'Events & Campaigns' ? (
+          <CampaignsScreen />
+        ) : (
+          <ScrollView contentContainerStyle={styles.feed}>
+            {/* Welcome Card */}
+            <View style={styles.cardWelcome}>
+              <Text style={styles.cardWelcomeText}>{feedCards[0].content}</Text>
             </View>
-            <Text style={styles.cardBody}>
-              ${feedCards[2].raised} raised of ${feedCards[2].goal} goal
-            </Text>
-            <Text style={styles.cardBody}>{feedCards[2].update}</Text>
-            <TouchableOpacity style={styles.ctaBtn}>
-              <Text style={styles.ctaBtnText}>View Campaign</Text>
-            </TouchableOpacity>
-          </View>
-          {/* Thank You Card */}
-          <View style={styles.cardThankyou}>
-            {feedCards[3].image ? (
-              <Image source={feedCards[3].image} style={styles.cardImageSmall} />
-            ) : (
-              <View style={[styles.cardImageSmall, { justifyContent: 'center', alignItems: 'center' }]}>
-                <Text style={{ color: '#fff' }}>Image</Text>
+            {/* Success Story Card */}
+            <View style={styles.cardSuccess}>
+              {feedCards[1].image ? (
+                <Image source={feedCards[1].image} style={styles.cardImage} />
+              ) : (
+                <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
+                  <Text style={{ color: '#fff' }}>Image</Text>
+                </View>
+              )}
+              <Text style={styles.cardTitle}>Success Story</Text>
+              <Text style={styles.cardBody}>{feedCards[1].story}</Text>
+              <TouchableOpacity style={styles.ctaBtn}>
+                <Text style={styles.ctaBtnText}>Read Full Story</Text>
+              </TouchableOpacity>
+            </View>
+            {/* Project Update Card */}
+            <View style={styles.cardProject}>
+              <Text style={styles.cardTitle}>{feedCards[2].campaign}</Text>
+              <View style={styles.progressBarBg}>
+                <View style={[styles.progressBarFill, { width: `${feedCards[2].progress * 100}%` }]} />
               </View>
-            )}
-            <Text style={styles.cardTitle}>Thank You!</Text>
-            <Text style={styles.cardBody}>{feedCards[3].message}</Text>
-            <Text style={styles.cardBody}>Recent donation: {feedCards[3].amount}</Text>
-          </View>
-          {/* Impact Stat Card */}
-          <View style={styles.cardStat}>
-            <FontAwesome5 name={feedCards[4].icon} size={32} color="#fff" />
-            <Text style={styles.cardStatNumber}>{feedCards[4].stat}</Text>
-            <Text style={styles.cardStatText}>{feedCards[4].text}</Text>
-          </View>
-          {/* New Campaign Card */}
-          <View style={styles.cardCampaign}>
-            {feedCards[5].image ? (
-              <Image source={feedCards[5].image} style={styles.cardImage} />
-            ) : (
-              <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                <Text style={{ color: '#fff' }}>Image</Text>
+              <Text style={styles.cardBody}>
+                ${feedCards[2].raised} raised of ${feedCards[2].goal} goal
+              </Text>
+              <Text style={styles.cardBody}>{feedCards[2].update}</Text>
+              <TouchableOpacity style={styles.ctaBtn}>
+                <Text style={styles.ctaBtnText}>View Campaign</Text>
+              </TouchableOpacity>
+            </View>
+            {/* Thank You Card */}
+            <View style={styles.cardThankyou}>
+              {feedCards[3].image ? (
+                <Image source={feedCards[3].image} style={styles.cardImageSmall} />
+              ) : (
+                <View style={[styles.cardImageSmall, { justifyContent: 'center', alignItems: 'center' }]}>
+                  <Text style={{ color: '#fff' }}>Image</Text>
+                </View>
+              )}
+              <Text style={styles.cardTitle}>Thank You!</Text>
+              <Text style={styles.cardBody}>{feedCards[3].message}</Text>
+              <Text style={styles.cardBody}>Recent donation: {feedCards[3].amount}</Text>
+            </View>
+            {/* Impact Stat Card */}
+            <View style={styles.cardStat}>
+              <FontAwesome5 name={feedCards[4].icon} size={32} color="#fff" />
+              <Text style={styles.cardStatNumber}>{feedCards[4].stat}</Text>
+              <Text style={styles.cardStatText}>{feedCards[4].text}</Text>
+            </View>
+            {/* New Campaign Card */}
+            <View style={styles.cardCampaign}>
+              {feedCards[5].image ? (
+                <Image source={feedCards[5].image} style={styles.cardImage} />
+              ) : (
+                <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
+                  <Text style={{ color: '#fff' }}>Image</Text>
+                </View>
+              )}
+              <Text style={styles.cardTitle}>{feedCards[5].title}</Text>
+              <TouchableOpacity style={styles.ctaBtnAccent}>
+                <Text style={styles.ctaBtnTextAccent}>Donate Now</Text>
+              </TouchableOpacity>
+            </View>
+            {/* Feed posts */}
+            {feedPosts.map(post => (
+              <View key={post.id} style={styles.feedPostCard}>
+                <Text style={styles.feedPostAuthor}>{post.author}</Text>
+                <Text style={styles.feedPostContent}>{post.content}</Text>
+                {post.media && (
+                  post.media.type === 'video' ? (
+                    <View style={styles.feedPostMedia}>
+                      <Text style={{ color: '#388e3c', fontWeight: 'bold' }}>Video attached</Text>
+                    </View>
+                  ) : (
+                    <Image source={{ uri: post.media.uri }} style={styles.feedPostImage} />
+                  )
+                )}
+                <View style={styles.feedPostActions}>
+                  <TouchableOpacity
+                    onPress={() => handleToggleLikePost(post.id)}
+                    style={styles.feedPostActionBtn}
+                  >
+                    <FontAwesome5
+                      name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"}
+                      size={16}
+                      color={likedPosts[post.id] ? "#2e7d32" : "#888"}
+                    />
+                    <Text style={[
+                      styles.feedPostActionText,
+                      likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }
+                    ]}>
+                      {likedPosts[post.id] ? "Liked" : "Like"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                {/* Comments */}
+                <View style={styles.feedPostComments}>
+                  {post.comments.map((c, idx) => (
+                    <View key={idx} style={styles.feedPostComment}>
+                      <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
+                      <Text style={styles.feedPostCommentText}>{c.text}</Text>
+                    </View>
+                  ))}
+                  <View style={styles.feedPostCommentInputRow}>
+                    <TextInput
+                      style={styles.feedPostCommentInput}
+                      value={commentInputs[post.id] || ''}
+                      onChangeText={text => setCommentInputs({ ...commentInputs, [post.id]: text })}
+                      placeholder="Write a comment..."
+                    />
+                    <TouchableOpacity onPress={() => handleAddComment(post.id)} style={styles.feedPostCommentBtn}>
+                      <Text style={styles.feedPostCommentBtnText}>Post</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
               </View>
-            )}
-            <Text style={styles.cardTitle}>{feedCards[5].title}</Text>
-            <TouchableOpacity style={styles.ctaBtnAccent}>
-              <Text style={styles.ctaBtnTextAccent}>Donate Now</Text>
-            </TouchableOpacity>
-          </View>
-          {/* Feed posts */}
-          {feedPosts.map(post => (
-            <View key={post.id} style={styles.feedPostCard}>
-              <Text style={styles.feedPostAuthor}>{post.author}</Text>
-              <Text style={styles.feedPostContent}>{post.content}</Text>
-              {post.media && (
-                post.media.type === 'video' ? (
+            ))}
+            {/* Spacer */}
+            <View style={{ height: 80 }} />
+          </ScrollView>
+        )}
+        {/* Floating Compose Button */}
+        <TouchableOpacity style={styles.fab} onPress={handleOpenPostModal}>
+          <FontAwesome5 name="pen" size={24} color="#fff" />
+        </TouchableOpacity>
+        {/* Post Compose Modal */}
+        {showPostModal && (
+          <View style={styles.postModalOverlay}>
+            <View style={styles.postModalContent}>
+              <Text style={styles.createPostTitle}>Compose Post</Text>
+              <TextInput
+                style={styles.createPostInput}
+                value={newPost}
+                onChangeText={setNewPost}
+                placeholder="Write something and post on the feed..."
+                multiline
+              />
+              {newPostMedia && (
+                newPostMedia.type === 'video' ? (
                   <View style={styles.feedPostMedia}>
                     <Text style={{ color: '#388e3c', fontWeight: 'bold' }}>Video attached</Text>
                   </View>
                 ) : (
-                  <Image source={{ uri: post.media.uri }} style={styles.feedPostImage} />
+                  <Image source={{ uri: newPostMedia.uri }} style={styles.feedPostImage} />
                 )
               )}
-              <View style={styles.feedPostActions}>
-                <TouchableOpacity
-                  onPress={() => handleToggleLikePost(post.id)}
-                  style={styles.feedPostActionBtn}
-                >
-                  <FontAwesome5
-                    name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"}
-                    size={16}
-                    color={likedPosts[post.id] ? "#2e7d32" : "#888"}
-                  />
-                  <Text style={[
-                    styles.feedPostActionText,
-                    likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }
-                  ]}>
-                    {likedPosts[post.id] ? "Liked" : "Like"}
-                  </Text>
+              <View style={{ flexDirection: 'row', marginBottom: 8 }}>
+                <TouchableOpacity style={styles.attachBtn} onPress={handlePickMedia}>
+                  <FontAwesome5 name="paperclip" size={18} color="#2e7d32" />
+                  <Text style={styles.attachBtnText}>Add Image/Video</Text>
                 </TouchableOpacity>
-              </View>
-              {/* Comments */}
-              <View style={styles.feedPostComments}>
-                {post.comments.map((c, idx) => (
-                  <View key={idx} style={styles.feedPostComment}>
-                    <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
-                    <Text style={styles.feedPostCommentText}>{c.text}</Text>
-                  </View>
-                ))}
-                <View style={styles.feedPostCommentInputRow}>
-                  <TextInput
-                    style={styles.feedPostCommentInput}
-                    value={commentInputs[post.id] || ''}
-                    onChangeText={text => setCommentInputs({ ...commentInputs, [post.id]: text })}
-                    placeholder="Write a comment..."
-                  />
-                  <TouchableOpacity onPress={() => handleAddComment(post.id)} style={styles.feedPostCommentBtn}>
-                    <Text style={styles.feedPostCommentBtnText}>Post</Text>
+                {newPostMedia && (
+                  <TouchableOpacity style={styles.removeMediaBtn} onPress={() => setNewPostMedia(null)}>
+                    <FontAwesome5 name="times" size={18} color="#fff" />
                   </TouchableOpacity>
-                </View>
+                )}
+              </View>
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+                <TouchableOpacity style={styles.createPostBtn} onPress={handleCreatePost}>
+                  <Text style={styles.createPostBtnText}>Post</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.cancelPostBtn} onPress={() => setShowPostModal(false)}>
+                  <Text style={styles.cancelPostBtnText}>Cancel</Text>
+                </TouchableOpacity>
               </View>
             </View>
-          ))}
-          {/* Spacer */}
-          <View style={{ height: 80 }} />
-        </ScrollView>
-      )}
-      {/* Floating Compose Button */}
-      <TouchableOpacity style={styles.fab} onPress={handleOpenPostModal}>
-        <FontAwesome5 name="pen" size={24} color="#fff" />
-      </TouchableOpacity>
-      {/* Post Compose Modal */}
-      {showPostModal && (
-        <View style={styles.postModalOverlay}>
-          <View style={styles.postModalContent}>
-            <Text style={styles.createPostTitle}>Compose Post</Text>
-            <TextInput
-              style={styles.createPostInput}
-              value={newPost}
-              onChangeText={setNewPost}
-              placeholder="Write something and post on the feed..."
-              multiline
-            />
-            {newPostMedia && (
-              newPostMedia.type === 'video' ? (
-                <View style={styles.feedPostMedia}>
-                  <Text style={{ color: '#388e3c', fontWeight: 'bold' }}>Video attached</Text>
-                </View>
-              ) : (
-                <Image source={{ uri: newPostMedia.uri }} style={styles.feedPostImage} />
-              )
-            )}
-            <View style={{ flexDirection: 'row', marginBottom: 8 }}>
-              <TouchableOpacity style={styles.attachBtn} onPress={handlePickMedia}>
-                <FontAwesome5 name="paperclip" size={18} color="#2e7d32" />
-                <Text style={styles.attachBtnText}>Add Image/Video</Text>
-              </TouchableOpacity>
-              {newPostMedia && (
-                <TouchableOpacity style={styles.removeMediaBtn} onPress={() => setNewPostMedia(null)}>
-                  <FontAwesome5 name="times" size={18} color="#fff" />
-                </TouchableOpacity>
-              )}
-            </View>
-            <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
-              <TouchableOpacity style={styles.createPostBtn} onPress={handleCreatePost}>
-                <Text style={styles.createPostBtnText}>Post</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.cancelPostBtn} onPress={() => setShowPostModal(false)}>
-                <Text style={styles.cancelPostBtnText}>Cancel</Text>
+          </View>
+        )}
+        {/* Hamburger Menu Drawer */}
+        <Modal visible={menuVisible} animationType="slide" transparent>
+          <View style={styles.drawerOverlay}>
+            <Pressable style={styles.drawerBg} onPress={() => setMenuVisible(false)} />
+            <View style={styles.drawerLeft}>
+              <View style={styles.drawerHeader}>
+                {profilePic ? (
+                  <Image source={profilePic} style={styles.profilePic} />
+                ) : (
+                  <View style={[styles.profilePic, { justifyContent: 'center', alignItems: 'center' }]}>
+                    <Text style={{ color: '#2e7d32', fontWeight: 'bold' }}>
+                      {firstName ? firstName[0] : 'U'}
+                    </Text>
+                  </View>
+                )}
+                <Text style={styles.drawerName}>{firstName} {lastName}</Text>
+                <Text style={styles.drawerEmail}>{userData.email}</Text>
+              </View>
+              <View style={[styles.drawerMenu, { alignItems: 'flex-start' }]}>
+                <DrawerItem icon="home" label="Home" active={activeMenu === 'Home'} onPress={() => handleMenuSelect('Home')} />
+                <DrawerItem icon="user" label="Profile" active={activeMenu === 'Profile'} onPress={() => handleMenuSelect('Profile')} />
+                <DrawerItem icon="heart" label="Donate" active={activeMenu === 'Donate'} onPress={() => handleMenuSelect('Donate')} />
+                <DrawerItem icon="truck" label="Track Logistics" active={activeMenu === 'Track Logistics'} onPress={() => handleMenuSelect('Track Logistics')} />
+                <DrawerItem icon="file-alt" label="History Overview" active={activeMenu === 'History Overview'} onPress={() => handleMenuSelect('History Overview')} />
+                <DrawerItem icon="cog" label="Settings" active={activeMenu === 'Settings'} onPress={() => handleMenuSelect('Settings')} />
+                <DrawerItem icon="chart-bar" label="Impact Reports" active={activeMenu === 'Impact Reports'} onPress={() => handleMenuSelect('Impact Reports')} />
+                <DrawerItem icon="calendar-alt" label="Events & Campaigns" active={activeMenu === 'Events & Campaigns'} onPress={() => handleMenuSelect('Events & Campaigns')} />
+                <DrawerItem icon="question-circle" label="Help & FAQ" active={activeMenu === 'Help & FAQ'} onPress={() => handleMenuSelect('Help & FAQ')} />
+              </View>
+              <TouchableOpacity style={styles.drawerLogout} onPress={onLogout}>
+                <FontAwesome5 name="lock" size={20} color="#2e7d32" />
+                <Text style={styles.drawerLogoutText}>Logout</Text>
               </TouchableOpacity>
             </View>
           </View>
-        </View>
-      )}
-      {/* Hamburger Menu Drawer */}
-      <Modal visible={menuVisible} animationType="slide" transparent>
-        <View style={styles.drawerOverlay}>
-          <Pressable style={styles.drawerBg} onPress={() => setMenuVisible(false)} />
-          <View style={styles.drawerLeft}>
-            <View style={styles.drawerHeader}>
-              {profilePic ? (
-                <Image source={profilePic} style={styles.profilePic} />
-              ) : (
-                <View style={[styles.profilePic, { justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: '#2e7d32', fontWeight: 'bold' }}>
-                    {firstName ? firstName[0] : 'U'}
-                  </Text>
-                </View>
-              )}
-              <Text style={styles.drawerName}>{firstName} {lastName}</Text>
-              <Text style={styles.drawerEmail}>{userData.email}</Text>
-            </View>
-            <View style={[styles.drawerMenu, { alignItems: 'flex-start' }]}>
-              <DrawerItem icon="home" label="Home" active={activeMenu === 'Home'} onPress={() => handleMenuSelect('Home')} />
-              <DrawerItem icon="user" label="Profile" active={activeMenu === 'Profile'} onPress={() => handleMenuSelect('Profile')} />
-              <DrawerItem icon="heart" label="Donate" active={activeMenu === 'Donate'} onPress={() => handleMenuSelect('Donate')} />
-              <DrawerItem icon="truck" label="Track Logistics" active={activeMenu === 'Track Logistics'} onPress={() => handleMenuSelect('Track Logistics')} />
-              <DrawerItem icon="file-alt" label="History Overview" active={activeMenu === 'History Overview'} onPress={() => handleMenuSelect('History Overview')} />
-              <DrawerItem icon="cog" label="Settings" active={activeMenu === 'Settings'} onPress={() => handleMenuSelect('Settings')} />
-              <DrawerItem icon="chart-bar" label="Impact Reports" active={activeMenu === 'Impact Reports'} onPress={() => handleMenuSelect('Impact Reports')} />
-              <DrawerItem icon="calendar-alt" label="Events & Campaigns" active={activeMenu === 'Events & Campaigns'} onPress={() => handleMenuSelect('Events & Campaigns')} />
-              <DrawerItem icon="question-circle" label="Help & FAQ" active={activeMenu === 'Help & FAQ'} onPress={() => handleMenuSelect('Help & FAQ')} />
-            </View>
-            <TouchableOpacity style={styles.drawerLogout} onPress={onLogout}>
-              <FontAwesome5 name="lock" size={20} color="#2e7d32" />
-              <Text style={styles.drawerLogoutText}>Logout</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-    </View>
+        </Modal>
+      </View>
+    </ThemeContext.Provider>
   );
 }
 

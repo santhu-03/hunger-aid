@@ -64,6 +64,7 @@
 import { FontAwesome5 } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useTheme } from './DonorDashboard';
 
 const MOCK_DONATIONS = [
 	{
@@ -117,6 +118,9 @@ const MOCK_DONATIONS = [
 ];
 
 export default function DonationHistoryScreen() {
+	const { currentTheme } = useTheme();
+	const isDark = currentTheme === 'dark';
+
 	const [isLoading, setIsLoading] = useState(true);
 	const [allDonations, setAllDonations] = useState([]);
 	const [filteredDonations, setFilteredDonations] = useState([]);
@@ -186,13 +190,13 @@ export default function DonationHistoryScreen() {
 	);
 
 	return (
-		<View style={styles.container}>
+		<View style={[styles.container, isDark && { backgroundColor: '#181a20' }]}>
 			{isLoading ? (
 				<ActivityIndicator size="large" color="#2e7d32" style={{ marginTop: 40 }} />
 			) : (
 				<>
-					<Text style={styles.title}>Donation History</Text>
-					<View style={styles.summaryCard}>
+					<Text style={[styles.title, isDark && { color: '#fff' }]}>Donation History</Text>
+					<View style={[styles.summaryCard, isDark && { backgroundColor: '#23262f' }]}>
 						<FontAwesome5
 							name="chart-bar"
 							size={22}

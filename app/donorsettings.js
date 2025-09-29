@@ -66,16 +66,21 @@
 
 import { FontAwesome5 } from '@expo/vector-icons';
 import React, { useState } from 'react';
-import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Linking, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { useTheme } from './DonorDashboard';
 
 export default function DonorSettingsScreen() {
+  // Remove local theme state, use context instead
+  const { theme, setTheme, currentTheme } = useTheme();
   const [notifications, setNotifications] = useState({
     campaignUpdates: true,
     thankYous: true,
     logistics: true,
   });
   const [isAnonymous, setIsAnonymous] = useState(false);
-  const [theme, setTheme] = useState('system');
+
+  // Helper for dynamic styles
+  const isDark = currentTheme === 'dark';
 
   const handleNotificationToggle = key => {
     setNotifications({ ...notifications, [key]: !notifications[key] });
@@ -83,48 +88,67 @@ export default function DonorSettingsScreen() {
 
   const handleAnonymousToggle = () => setIsAnonymous(val => !val);
 
-  const handleThemeChange = themeName => setTheme(themeName);
+  const handlePrivacyPolicy = () => {
+    // Replace with your privacy policy URL
+    Linking.openURL('https://yourdomain.com/privacy-policy').catch(() =>
+      Alert.alert('Error', 'Unable to open Privacy Policy.')
+    );
+  };
+
+  const handleTermsOfService = () => {
+    // Replace with your terms of service URL
+    Linking.openURL('https://yourdomain.com/terms-of-service').catch(() =>
+      Alert.alert('Error', 'Unable to open Terms of Service.')
+    );
+  };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 }}>
-      <Text style={styles.title}>App Settings</Text>
-
+    <ScrollView
+      style={[
+        styles.container,
+        isDark && { backgroundColor: '#181a20' }
+      ]}
+      contentContainerStyle={{ paddingBottom: 32 }}
+    >
+      <Text style={[styles.title, isDark && { color: '#fff' }]}>App Settings</Text>
       {/* Notifications */}
-      <Text style={styles.sectionHeader}>NOTIFICATIONS</Text>
-      <View style={styles.card}>
+      <Text style={[styles.sectionHeader, isDark && { color: '#bbb' }]}>NOTIFICATIONS</Text>
+      <View style={[styles.card, isDark && { backgroundColor: '#23262f' }]}>
         <View style={styles.settingRow}>
-          <Text style={styles.rowLabel}>Campaign Updates</Text>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>Campaign Updates</Text>
           <Switch
             value={notifications.campaignUpdates}
             onValueChange={() => handleNotificationToggle('campaignUpdates')}
             thumbColor={notifications.campaignUpdates ? '#2e7d32' : '#ccc'}
+            trackColor={{ false: '#ccc', true: '#a5d6a7' }}
           />
         </View>
         <View style={styles.separator} />
         <View style={styles.settingRow}>
-          <Text style={styles.rowLabel}>Thank You Messages</Text>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>Thank You Messages</Text>
           <Switch
             value={notifications.thankYous}
             onValueChange={() => handleNotificationToggle('thankYous')}
             thumbColor={notifications.thankYous ? '#2e7d32' : '#ccc'}
+            trackColor={{ false: '#ccc', true: '#a5d6a7' }}
           />
         </View>
         <View style={styles.separator} />
         <View style={styles.settingRow}>
-          <Text style={styles.rowLabel}>Logistics Updates</Text>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>Logistics Updates</Text>
           <Switch
             value={notifications.logistics}
             onValueChange={() => handleNotificationToggle('logistics')}
             thumbColor={notifications.logistics ? '#2e7d32' : '#ccc'}
+            trackColor={{ false: '#ccc', true: '#a5d6a7' }}
           />
         </View>
       </View>
-
       {/* Appearance */}
-      <Text style={styles.sectionHeader}>APPEARANCE</Text>
-      <View style={styles.card}>
+      <Text style={[styles.sectionHeader, isDark && { color: '#bbb' }]}>APPEARANCE</Text>
+      <View style={[styles.card, isDark && { backgroundColor: '#23262f' }]}>
         <View style={styles.settingRow}>
-          <Text style={styles.rowLabel}>Theme</Text>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>Theme</Text>
           <View style={{ flexDirection: 'row' }}>
             {['light', 'dark', 'system'].map(opt => (
               <TouchableOpacity
@@ -132,10 +156,12 @@ export default function DonorSettingsScreen() {
                 style={[
                   styles.themeButton,
                   theme === opt && styles.themeButtonActive,
+                  isDark && { backgroundColor: '#23262f', borderWidth: 1, borderColor: '#444' },
+                  theme === opt && isDark && { backgroundColor: '#2e7d32' }
                 ]}
-                onPress={() => handleThemeChange(opt)}
+                onPress={() => setTheme(opt)}
               >
-                <Text style={theme === opt ? styles.themeButtonTextActive : styles.themeButtonText}>
+                <Text style={theme === opt ? styles.themeButtonTextActive : [styles.themeButtonText, isDark && { color: '#fff' }]}>
                   {opt.charAt(0).toUpperCase() + opt.slice(1)}
                 </Text>
               </TouchableOpacity>
@@ -143,35 +169,34 @@ export default function DonorSettingsScreen() {
           </View>
         </View>
       </View>
-
       {/* Privacy */}
-      <Text style={styles.sectionHeader}>PRIVACY</Text>
-      <View style={styles.card}>
+      <Text style={[styles.sectionHeader, isDark && { color: '#bbb' }]}>PRIVACY</Text>
+      <View style={[styles.card, isDark && { backgroundColor: '#23262f' }]}>
         <View style={styles.settingRow}>
-          <Text style={styles.rowLabel}>Donate Anonymously</Text>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>Donate Anonymously</Text>
           <Switch
             value={isAnonymous}
             onValueChange={handleAnonymousToggle}
             thumbColor={isAnonymous ? '#2e7d32' : '#ccc'}
+            trackColor={{ false: '#ccc', true: '#a5d6a7' }}
           />
         </View>
         <View style={styles.separator} />
-        <TouchableOpacity style={styles.settingRow}>
-          <Text style={styles.rowLabel}>Privacy Policy</Text>
-          <FontAwesome5 name="chevron-right" size={16} color="#888" />
+        <TouchableOpacity style={styles.settingRow} onPress={handlePrivacyPolicy}>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>Privacy Policy</Text>
+          <FontAwesome5 name="chevron-right" size={16} color={isDark ? "#bbb" : "#888"} />
         </TouchableOpacity>
       </View>
-
       {/* About */}
-      <Text style={styles.sectionHeader}>ABOUT</Text>
-      <View style={styles.card}>
-        <TouchableOpacity style={styles.settingRow}>
-          <Text style={styles.rowLabel}>Terms of Service</Text>
-          <FontAwesome5 name="chevron-right" size={16} color="#888" />
+      <Text style={[styles.sectionHeader, isDark && { color: '#bbb' }]}>ABOUT</Text>
+      <View style={[styles.card, isDark && { backgroundColor: '#23262f' }]}>
+        <TouchableOpacity style={styles.settingRow} onPress={handleTermsOfService}>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>Terms of Service</Text>
+          <FontAwesome5 name="chevron-right" size={16} color={isDark ? "#bbb" : "#888"} />
         </TouchableOpacity>
         <View style={styles.separator} />
         <View style={styles.settingRow}>
-          <Text style={styles.rowLabel}>App Version 1.0.0</Text>
+          <Text style={[styles.rowLabel, isDark && { color: '#fff' }]}>App Version 1.0.0</Text>
         </View>
       </View>
     </ScrollView>

@@ -3,6 +3,7 @@ import * as ImagePicker from 'expo-image-picker';
 import React, { useState } from 'react';
 import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import VolunteerProfile from '../profile/VolunteerProfile';
+import VDeliveryScreen from './VDeliveryScreen';
 
 // Use the same feedCards and feed logic as DonorDashboard
 export default function VolunteerDashboard({ userData, onLogout }) {
@@ -25,6 +26,22 @@ export default function VolunteerDashboard({ userData, onLogout }) {
   const [showPostModal, setShowPostModal] = useState(false);
   const [commentInputs, setCommentInputs] = useState({});
   const [likedPosts, setLikedPosts] = useState({});
+
+  // Sample delivery task for demonstration
+  const sampleDeliveryTask = {
+    taskId: 'task_abc_789',
+    foodSummary: 'Approx. 5 kg of Cooked Rice & Dal',
+    pickupLocation: {
+      address: '123, MG Road, Ashok Nagar, Bengaluru, 560001',
+      coordinates: { latitude: 12.974, longitude: 77.607 }
+    },
+    dropoffLocation: {
+      address: '456, 1st Main Rd, Koramangala 8th Block, Bengaluru, 560095',
+      coordinates: { latitude: 12.934, longitude: 77.626 }
+    },
+    totalDistance: 7.2,
+    estimatedTime: 28
+  };
 
   // Use the same donor feed cards
   const feedCards = [
@@ -157,6 +174,18 @@ export default function VolunteerDashboard({ userData, onLogout }) {
           onSave={handleProfileSave}
           onClose={() => setActiveMenu('Home')}
         />
+      ) : activeMenu === 'Transport Requests' ? (
+        <VDeliveryScreen
+          deliveryTaskDetails={sampleDeliveryTask}
+          onAccept={id => {
+            alert('Accepted delivery task: ' + id);
+            setActiveMenu('Home');
+          }}
+          onReject={id => {
+            alert('Rejected delivery task: ' + id);
+            setActiveMenu('Home');
+          }}
+        />
       ) : (
         <>
           <ScrollView contentContainerStyle={styles.feed}>
@@ -266,6 +295,7 @@ export default function VolunteerDashboard({ userData, onLogout }) {
             <View style={[styles.drawerMenu, { alignItems: 'flex-start' }]}>
               <DrawerItem icon="home" label="Home" active={activeMenu === 'Home'} onPress={() => handleMenuSelect('Home')} />
               <DrawerItem icon="user" label="Profile" active={activeMenu === 'Profile'} onPress={() => handleMenuSelect('Profile')} />
+              <DrawerItem icon="truck" label="Transport Requests" active={activeMenu === 'Transport Requests'} onPress={() => handleMenuSelect('Transport Requests')} />
               <DrawerItem icon="calendar-alt" label="Find Opportunities" active={activeMenu === 'Find Opportunities'} onPress={() => handleMenuSelect('Find Opportunities')} />
               <DrawerItem icon="calendar" label="My Schedule" active={activeMenu === 'My Schedule'} onPress={() => handleMenuSelect('My Schedule')} />
               <DrawerItem icon="clock" label="Log My Hours" active={activeMenu === 'Log My Hours'} onPress={() => handleMenuSelect('Log My Hours')} />

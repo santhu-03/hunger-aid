@@ -82,10 +82,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Dimensions, StyleSheet, Text, View } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import FontAwesome5 from 'react-native-vector-icons/FontAwesome5';
+import { useTheme } from './DonorDashboard';
 
 const { width, height } = Dimensions.get('window');
 
 export default function TrackDonationScreen() {
+  const { currentTheme } = useTheme();
+  const isDark = currentTheme === 'dark';
   const [isLoading, setIsLoading] = useState(true);
   const [donationDetails, setDonationDetails] = useState(null);
   const [volunteerLocation, setVolunteerLocation] = useState(null);
@@ -153,14 +156,14 @@ export default function TrackDonationScreen() {
 
   if (isLoading || !donationDetails || !volunteerLocation) {
     return (
-      <View style={styles.container}>
+      <View style={[styles.container, isDark && { backgroundColor: '#181a20' }]}>
         <ActivityIndicator size="large" color="#2e7d32" />
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, isDark && { backgroundColor: '#181a20' }]}>
       <MapView
         style={styles.map}
         initialRegion={mapRegion}
@@ -182,10 +185,10 @@ export default function TrackDonationScreen() {
           strokeWidth={5}
         />
       </MapView>
-      <View style={styles.infoPanel}>
-        <Text style={styles.statusText}>{donationDetails.status}</Text>
-        <Text style={styles.volunteerText}>Volunteer: {donationDetails.volunteer.name}</Text>
-        <Text style={styles.etaText}>ETA: 15 minutes</Text>
+      <View style={[styles.infoPanel, isDark && { backgroundColor: '#23262f' }]}>
+        <Text style={[styles.statusText, isDark && { color: '#fff' }]}>{donationDetails.status}</Text>
+        <Text style={[styles.volunteerText, isDark && { color: '#fff' }]}>Volunteer: {donationDetails.volunteer.name}</Text>
+        <Text style={[styles.etaText, isDark && { color: '#fff' }]}>ETA: 15 minutes</Text>
       </View>
     </View>
   );
