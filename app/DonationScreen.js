@@ -48,6 +48,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { addDoc, collection, getFirestore, Timestamp } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
 import React, { useState } from 'react';
 import { ActivityIndicator, Alert, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
@@ -151,7 +152,14 @@ export default function DonationScreen({ navigation }) {
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Post', onPress: async () => {
-            const offerExpiry = Timestamp.fromMillis(Date.now() + 15 * 60 * 1000);
+            const offerExpiry = Timestamp.fromMillis(Date.now() + 5 * 60 * 1000);
+            const auth = getAuth();
+            const currentUser = auth.currentUser;
+            if (!currentUser || !currentUser.uid) {
+              Alert.alert('Authentication required', 'You must be signed in to post a donation.');
+              return;
+            }
+
             const donationData = {
               foodItem,
               foodType,
@@ -160,12 +168,18 @@ export default function DonationScreen({ navigation }) {
               photoUri,
               location: locationInfo ? locationInfo.coords : null,
               createdAt: new Date().toISOString(),
+              donorId: currentUser.uid,
               status: 'Offered',
               offeredTo: selectedBeneficiary.id,
               offerExpiry
             };
-            await addDoc(collection(db, 'donations'), donationData);
-            Alert.alert('Success', 'Your donation has been posted!');
+            try {
+              await addDoc(collection(db, 'donations'), donationData);
+              Alert.alert('Success', 'Your donation has been posted!');
+            } catch (e) {
+              console.error('Error creating donation:', e);
+              Alert.alert('Error creating donation', e && e.message ? e.message : String(e));
+            }
           } }
       ]
     );

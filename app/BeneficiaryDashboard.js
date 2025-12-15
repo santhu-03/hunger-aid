@@ -89,6 +89,8 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     const currentUser = auth.currentUser;
     if (!currentUser || !currentUser.uid) return;
 
+    console.log('BeneficiaryDashboard: currentUser uid ->', currentUser.uid);
+
     const db = getFirestore(app);
     const q = query(
       collection(db, 'donations'),
@@ -102,6 +104,9 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
       } else {
         setPendingOffer(null);
       }
+    }, (error) => {
+      console.error('BeneficiaryDashboard snapshot listener error:', error);
+      Alert.alert('Error', error.message || 'Failed to listen for offers');
     });
     return () => unsub();
   }, [userData]);
@@ -448,7 +453,7 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
                   A donation of <Text style={{ fontWeight: 'bold' }}>{offerModal.foodItem}</Text> is available nearby.
                 </Text>
                 <Text style={{ fontSize: 14, color: '#888', marginBottom: 18 }}>
-                  You have 15 minutes to respond.
+                  You have 5 minutes to respond.
                 </Text>
                 <TouchableOpacity
                   style={{

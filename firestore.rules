@@ -2,18 +2,50 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Rules updated to allow authenticated users to manage their own user
+    // documents. The previous permissive rule had an expiry date and is now
+    // expired which caused client requests to be denied (insufficient
+    // permissions).
 
-    // This rule allows anyone with your Firestore database reference to view, edit,
-    // and delete all data in your Firestore database. It is useful for getting
-    // started, but it is configured to expire after 30 days because it
-    // leaves your app open to attackers. At that time, all client
-    // requests to your Firestore database will be denied.
-    //
-    // Make sure to write security rules for your app before that time, or else
-    // all client requests to your Firestore database will be denied until you Update
-    // your rules
+    // Allow authenticated users to read/write their own user document
+    match /users/{userId} {
+      allow create: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow update, delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Donations: donors create donations; beneficiaries can read offers addressed to them;
+    // donors and the addressed beneficiary can update the donation status.
+    match /donations/{donationId} {
+      // Create only allowed when the donorId field matches the authenticated user
+      allow create: if request.auth != null && request.resource.data.donorId == request.auth.uid;
+
+      // Read allowed for the donor or the beneficiary who was offered the donation
+      allow read: if request.auth != null && (
+        resource.data.donorId == request.auth.uid ||
+        (resource.data.offeredTo == request.auth.uid)
+      );
+
+      // Update allowed for the donor or the beneficiary who was offered the donation
+      allow update: if request.auth != null && (
+        resource.data.donorId == request.auth.uid ||
+        resource.data.offeredTo == request.auth.uid
+      );
+
+      // Only donor may delete
+      allow delete: if request.auth != null && resource.data.donorId == request.auth.uid;
+    }
+
+    // Example: allow authenticated users to read/write other collections they
+    // own. Adjust collections and rules below to fit your data model.
+    // match /someCollection/{docId} {
+    //   allow read, write: if request.auth != null && request.auth.uid == resource.data.ownerId;
+    // }
+
+    // A conservative default: deny all other access. Add more granular rules
+    // for additional collections as needed.
     match /{document=**} {
-      allow read, write: if request.time < timestamp.date(2025, 10, 26);
+      allow read, write: if false;
     }
   }
 }

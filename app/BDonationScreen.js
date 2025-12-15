@@ -6,7 +6,7 @@
 // Description:
 // Create a React Native component that displays a pending food donation offer to a beneficiary.
 // The screen must clearly show all relevant details and provide two primary actions: Accept or Decline.
-// A prominent 15-minute countdown timer is a critical feature of this screen.
+// A prominent 5-minute countdown timer is a critical feature of this screen.
 
 // Requirement 1: Component Props
 // This component will receive its data via props. Define the expected props.
@@ -25,14 +25,14 @@
 
 // Requirement 2: State Management
 // Define the state needed for the component's internal logic.
-// - timeLeft: A number representing the remaining seconds. Initialize to 900 (15 minutes).
+// - timeLeft: A number representing the remaining seconds. Initialize to 300 (5 minutes).
 
 // Requirement 3: UI Component Structure
 // Render a view that is clear, concise, and focused on decision-making.
 // The UI elements must be in the following order:
 // 1.  A large, attention-grabbing title: "New Donation Available!".
 // 2.  A highly prominent Countdown Timer.
-//     - Display the 'timeLeft' state in a formatted way (e.g., "Time Remaining: 14:59").
+//     - Display the 'timeLeft' state in a formatted way (e.g., "Time Remaining: 04:59").
 //     - The text should be large and possibly a distinct color (e.g., orange or red as time gets lower).
 // 3.  A large Image component displaying the food from `donationDetails.photoUri`.
 // 4.  A "Details Card" View to group the core information:
@@ -96,7 +96,7 @@ export default function BDonationScreen(props) {
   const [donationDetails, setDonationDetails] = useState(null);
   const [loadingDonation, setLoadingDonation] = useState(true);
   // Timer state always declared, but only used if donationDetails exists
-  const [timeLeft, setTimeLeft] = useState(900);
+  const [timeLeft, setTimeLeft] = useState(300);
   const auth = getAuth();
   const currentUser = auth ? auth.currentUser : null;
   const db = getFirestore();
@@ -104,6 +104,7 @@ export default function BDonationScreen(props) {
   // Real-time listener for new donation offers
   useEffect(() => {
     if (!currentUser || !currentUser.uid) return;
+    console.log('BDonationScreen: currentUser uid ->', currentUser.uid);
     const q = query(
       collection(db, 'donations'),
       where('offeredTo', '==', currentUser.uid),
@@ -129,6 +130,11 @@ export default function BDonationScreen(props) {
         setDonationDetails(null);
       }
       setLoadingDonation(false);
+    }, (error) => {
+      console.error('BDonationScreen snapshot listener error:', error);
+      // Fail gracefully: set loading false so UI can render and show message
+      setLoadingDonation(false);
+      Alert.alert('Error', error.message || 'Failed to listen for offers');
     });
     return () => unsubscribe();
   }, [currentUser]);

@@ -112,14 +112,34 @@ exports.onDonationCreate = onDocumentCreated("donations/{donationId}", async (ev
     return snap.ref.update({status: "Expired", error: "No eligible beneficiary found"});
   }
 
-  // Timed offer: 15 minutes from now
-  const offerExpiry = Timestamp.fromMillis(Date.now() + 15 * 60 * 1000);
+  // Timed offer: 5 minutes from now
+  const offerExpiry = Timestamp.fromMillis(Date.now() + 5 * 60 * 1000);
 
-  return snap.ref.update({
+  // Update donation status
+  await snap.ref.update({
     status: "Offered",
     offeredTo: nearest.id,
     offerExpiry,
   });
+
+  // Send notification to the beneficiary
+  const beneficiarySnap = await db.doc(`users/${nearest.id}`).get();
+  const beneficiary = beneficiarySnap.data();
+  if (beneficiary && beneficiary.fcmToken) {
+    const messaging = getMessaging();
+    const payload = {
+      notification: {
+        title: "New Donation Offer!",
+        body: "A donor has posted a donation near you. Please review and accept or decline.",
+      },
+      data: {
+        type: "donation_offer",
+        donationId: donationId,
+      },
+    };
+    await messaging.sendToDevice(beneficiary.fcmToken, payload);
+  }
+  return null;
 });
 
 // 1.2. onDonationUpdate (Updated to v2 syntax)
@@ -129,6 +149,29 @@ exports.onDonationUpdate = onDocumentUpdated("donations/{donationId}", async (ev
   const donationId = event.params.donationId;
   const db = getFirestore();
 
+  // Notify donor if beneficiary accepts or declines
+  if (before.status === "Offered" && (after.status === "Accepted" || after.status === "Declined") && after.donorId) {
+    const donorSnap = await db.doc(`users/${after.donorId}`).get();
+    if (donorSnap.exists && donorSnap.data().fcmToken) {
+      const messaging = getMessaging();
+      const payload = {
+        notification: {
+          title: after.status === "Accepted" ? "Donation Accepted!" : "Donation Declined",
+          body: after.status === "Accepted"
+            ? "Your donation was accepted by the beneficiary."
+            : "Your donation was declined by the beneficiary.",
+        },
+        data: {
+          type: "donation_status",
+          donationId: donationId,
+          status: after.status,
+        },
+      };
+      await messaging.sendToDevice(donorSnap.data().fcmToken, payload);
+    }
+  }
+
+  // Existing logic for assigning volunteer after acceptance
   if (before.status !== "Accepted" && after.status === "Accepted" && after.beneficiaryId) {
     const beneficiarySnap = await db.doc(`users/${after.beneficiaryId}`).get();
     const beneficiary = beneficiarySnap.data();

@@ -1,5 +1,8 @@
 {
   "projects": {
-    "default": "hungeraid-60fb6"
-  }
+    "default": "hungeraid-60fb6",
+    "hungeraid": "hungeraid-60fb6"
+  },
+  "targets": {},
+  "etags": {}
 }

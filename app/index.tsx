@@ -62,7 +62,10 @@ export default function App() {
             setUserData(docSnap.data() as UserData);
           }
         } catch (e) {
-          Alert.alert('Error', 'Failed to fetch user data.');
+          console.error('Error fetching user document:', e);
+          const msg = (e && typeof e === 'object' && 'message' in e) ? (e as any).message : 'Failed to fetch user data.';
+          Alert.alert('Error fetching user', msg);
+          setErrorMsg(msg);
         }
       } else {
         setUser(null);
@@ -287,12 +290,16 @@ export default function App() {
       {/* Form */}
       {mode === 'signup' && (
         <>
+          <Text style={styles.inputLabel}>Full Name</Text>
           <TextInput
             style={styles.input}
             placeholder="Full Name"
             value={name}
             onChangeText={setName}
+            accessibilityLabel="Full Name"
           />
+
+          <Text style={styles.inputLabel}>Email Address</Text>
           <TextInput
             style={styles.input}
             placeholder="Email Address"
@@ -300,18 +307,23 @@ export default function App() {
             keyboardType="email-address"
             value={email}
             onChangeText={setEmail}
+            accessibilityLabel="Email Address"
           />
+
+          <Text style={styles.inputLabel}>Password</Text>
           <TextInput
             style={styles.input}
             placeholder="Password"
             secureTextEntry
             value={password}
             onChangeText={setPassword}
+            accessibilityLabel="Password"
           />
         </>
       )}
       {mode === 'login' && (
         <>
+          <Text style={styles.inputLabel}>Username</Text>
           <TextInput
             style={styles.input}
             placeholder="Email Address"
@@ -319,13 +331,17 @@ export default function App() {
             keyboardType="email-address"
             value={email}
             onChangeText={setEmail}
+            accessibilityLabel="Username"
           />
+
+          <Text style={styles.inputLabel}>Password</Text>
           <TextInput
             style={styles.input}
             placeholder="Password"
             secureTextEntry
             value={password}
             onChangeText={setPassword}
+            accessibilityLabel="Password"
           />
         </>
       )}
@@ -471,6 +487,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#c8e6c9',
     fontSize: 16,
+  },
+  inputLabel: {
+    alignSelf: 'flex-start',
+    marginLeft: 32,
+    marginBottom: 6,
+    color: '#2e7d32',
+    fontWeight: '600',
   },
   primaryBtn: {
     backgroundColor: '#2e7d32',

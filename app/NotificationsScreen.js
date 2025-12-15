@@ -65,7 +65,8 @@
  */
 
 import { FontAwesome5 } from '@expo/vector-icons';
-import React, { useEffect, useState } from 'react';
+import * as Notifications from 'expo-notifications';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const MOCK_NOTIFICATIONS = [
@@ -138,6 +139,7 @@ const MOCK_NOTIFICATIONS = [
 export default function NotificationsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [notifications, setNotifications] = useState([]);
+  const notificationListener = useRef(null);
 
   useEffect(() => {
     setIsLoading(true);
@@ -145,6 +147,27 @@ export default function NotificationsScreen() {
       setNotifications(MOCK_NOTIFICATIONS);
       setIsLoading(false);
     }, 1000);
+
+    // Listen for foreground push notifications
+    notificationListener.current = Notifications.addNotificationReceivedListener((notification) => {
+      const notif = notification.request && notification.request.content;
+      if (notif) {
+        setNotifications(prev => [
+          {
+            id: Date.now().toString(),
+            type: notif.data?.type || 'announcement',
+            title: notif.title || 'Notification',
+            message: notif.body || '',
+            date: new Date().toISOString().slice(0, 10),
+            read: false,
+          },
+          ...prev,
+        ]);
+      }
+    });
+    return () => {
+      if (notificationListener.current) Notifications.removeNotificationSubscription(notificationListener.current);
+    };
   }, []);
 
   const handleMarkAsRead = (notificationId) => {

@@ -1,43 +1,65 @@
-Here is the prompt to create the real-time workflow you described.
+Act as a senior Firebase + backend architect.
 
-Objective: Refactor the donation process so that when a donor posts a new food donation, it is immediately offered to the single nearest beneficiary and appears in their "Aid Status."
+Implement an end-to-end food delivery assignment system for the HungerAid app using Firebase (Firestore + Cloud Functions).
 
-Part 1: Backend Logic (in functions/index.js)
-Create a Cloud Function named onDonationCreate that automatically processes new donations.
+SCENARIO:
+1. A donor creates a food donation with pickup location (latitude, longitude).
+2. A beneficiary accepts the food.
+3. Once accepted:
+   - The system must automatically find the NEAREST available volunteer.
+   - The delivery task must be assigned to that volunteer.
+4. The volunteer must have the option to:
+   - ACCEPT the task → task status becomes "in_progress"
+   - REJECT the task → system assigns the task to the next nearest volunteer.
+5. If no volunteer accepts, mark task as "unassigned" and notify admin.
 
-Trigger: The function must activate when a new document is created in the donations collection.
+REQUIREMENTS:
+- Use Firestore for data storage.
+- Use Firebase Cloud Functions for backend logic.
+- Use Expo push notifications to notify volunteers.
+- Volunteers must be filtered by:
+  - Availability status = "available"
+  - Role = "volunteer"
+  - Distance from pickup location (nearest first)
+- Prevent race conditions (two volunteers accepting same task).
+- Ensure secure role-based access.
 
-Get Data: Extract the new donation's pickupLocation.
+DATA MODEL:
+Design Firestore collections for:
+- users (with role, availability, lastKnownLocation)
+- donations
+- deliveryTasks
+- notifications
 
-Find Nearest Beneficiary:
+WORKFLOW LOGIC:
+1. Beneficiary clicks "Accept Food"
+2. Firestore trigger runs:
+   - Create deliveryTask
+   - Query volunteers ordered by distance
+3. Assign task to nearest volunteer
+4. Send push notification to volunteer
+5. Volunteer response:
+   - Accept → lock task to volunteer
+   - Reject → update task + reassign to next nearest volunteer
 
-Query the users collection for all users with role: 'beneficiary'.
+TECHNICAL REQUIREMENTS:
+- Use GeoPoint for locations
+- Use Haversine formula or geohash-based querying
+- Use Firestore transactions for accept/reject
+- Add TTL / timeout if volunteer does not respond
+- Log assignment attempts
 
-In the function's code, calculate the distance from the donation to each beneficiary to find the single nearest one.
+DELIVERABLES:
+1. Firestore schema (collections & fields)
+2. Cloud Function code (assignment & reassignment)
+3. React Native logic for:
+   - Beneficiary accept action
+   - Volunteer accept/reject UI
+4. Firestore security rules
+5. Required Firestore indexes
+6. Error handling & edge cases
 
-Assign the Offer: Update the new donation document in Firestore with the following fields:
-
-status: 'Offered'
-
-offeredTo: 'NEAREST_BENEFICIARY_ID'
-
-offerExpiry: <A timestamp 15 minutes from now>
-
-Part 2: Frontend Listener (in BeneficiaryDashboard.js or your Aid Status screen)
-Set up a real-time Firestore listener that updates the "Aid Status" when an offer is received.
-
-Use useEffect: Create a listener that starts when the component mounts.
-
-Add Guard Clause: Ensure the currentUser.uid is available before creating the query to prevent errors.
-
-Create the Query: The listener must query the donations collection for any documents where:
-
-status is equal to 'Offered'
-
-offeredTo is equal to the currentUser.uid
-
-Use onSnapshot:
-
-When the listener receives data, update a local state variable (e.g., setPendingOffer(data)).
-
-Your "Aid Status" UI should be designed to read from this state. If pendingOffer is not null, it should display the details of the new offer and provide "Accept" / "Decline" buttons.
+- Reassign task automatically after 60 seconds if no response
+- Show ETA to beneficiary
+- Track volunteer live location
+- Admin override assignment
