@@ -5,6 +5,7 @@ import { getAuth } from 'firebase/auth';
 import { arrayUnion, collection, doc, getFirestore, onSnapshot, query, runTransaction, serverTimestamp, updateDoc, where } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import MapView, { Marker, Polyline } from 'react-native-maps';
 import VolunteerProfile from '../profile/VolunteerProfile';
 import { acceptDelivery, rejectDelivery } from '../services/volunteerAssignmentService';
 
@@ -39,6 +40,7 @@ export default function VolunteerDashboard({ userData, onLogout }) {
   const [activeTask, setActiveTask] = useState(null);
   const [taskError, setTaskError] = useState('');
   const [pendingDonations, setPendingDonations] = useState([]);
+  const [donationLocations, setDonationLocations] = useState({}); // { donationId: { donor: {}, beneficiary: {} } }
 
   // Location tracking state
   const [isTrackingLocation, setIsTrackingLocation] = useState(false);
@@ -106,6 +108,64 @@ export default function VolunteerDashboard({ userData, onLogout }) {
     });
     return () => unsub();
   }, [volunteerId]);
+
+  // Real-time location tracking for donors and beneficiaries
+  useEffect(() => {
+    if (pendingDonations.length === 0) {
+      setDonationLocations({});
+      return;
+    }
+
+    const unsubscribers = [];
+    const newLocations = {};
+
+    pendingDonations.forEach((donation) => {
+      const donorId = donation.donorId;
+      const beneficiaryId = donation.beneficiaryId || donation.offeredTo;
+
+      if (donorId) {
+        const donorUnsub = onSnapshot(doc(db, 'users', donorId), (snap) => {
+          if (snap.exists()) {
+            const donorData = snap.data();
+            setDonationLocations((prev) => ({
+              ...prev,
+              [donation.id]: {
+                ...prev[donation.id],
+                donor: {
+                  location: donorData.location,
+                  name: donorData.name || 'Donor',
+                },
+              },
+            }));
+          }
+        });
+        unsubscribers.push(donorUnsub);
+      }
+
+      if (beneficiaryId) {
+        const beneficiaryUnsub = onSnapshot(doc(db, 'users', beneficiaryId), (snap) => {
+          if (snap.exists()) {
+            const beneficiaryData = snap.data();
+            setDonationLocations((prev) => ({
+              ...prev,
+              [donation.id]: {
+                ...prev[donation.id],
+                beneficiary: {
+                  location: beneficiaryData.location,
+                  name: beneficiaryData.name || 'Beneficiary',
+                },
+              },
+            }));
+          }
+        });
+        unsubscribers.push(beneficiaryUnsub);
+      }
+    });
+
+    return () => {
+      unsubscribers.forEach((unsub) => unsub());
+    };
+  }, [pendingDonations]);
 
   // Handle transport toggle - fetch and store location when activated
   const handleTransportToggle = async () => {
@@ -459,12 +519,34 @@ export default function VolunteerDashboard({ userData, onLogout }) {
             {pendingDonations.length > 0 ? (
               <ScrollView style={styles.requestsScrollView} contentContainerStyle={styles.requestsScrollContent}>
               {pendingDonations.map((d) => {
-                const pickupLat = d.location?.latitude;
-                const pickupLon = d.location?.longitude;
-                const dropLat = d.dropLocation?.latitude;
-                const dropLon = d.dropLocation?.longitude;
-                const distance = d.distance || (pickupLat && dropLat ? 
-                  Math.sqrt(Math.pow(pickupLat - dropLat, 2) + Math.pow(pickupLon - dropLon, 2)) * 111 : 0);
+                const locations = donationLocations[d.id] || {};
+                const donorLoc = locations.donor?.location;
+                const beneficiaryLoc = locations.beneficiary?.location;
+                
+                const pickupLat = donorLoc?.latitude;
+                const pickupLon = donorLoc?.longitude;
+                const dropLat = beneficiaryLoc?.latitude;
+                const dropLon = beneficiaryLoc?.longitude;
+                
+                const hasValidLocations = pickupLat && pickupLon && dropLat && dropLon;
+                const distance = hasValidLocations
+                  ? Math.sqrt(Math.pow(pickupLat - dropLat, 2) + Math.pow(pickupLon - dropLon, 2)) * 111
+                  : 0;
+
+                // Calculate map region to fit both markers
+                let mapRegion = null;
+                if (hasValidLocations) {
+                  const midLat = (pickupLat + dropLat) / 2;
+                  const midLon = (pickupLon + dropLon) / 2;
+                  const latDelta = Math.abs(pickupLat - dropLat) * 2.5 || 0.01;
+                  const lonDelta = Math.abs(pickupLon - dropLon) * 2.5 || 0.01;
+                  mapRegion = {
+                    latitude: midLat,
+                    longitude: midLon,
+                    latitudeDelta: Math.max(latDelta, 0.01),
+                    longitudeDelta: Math.max(lonDelta, 0.01),
+                  };
+                }
                 
                 return (
                   <View key={d.id} style={styles.deliveryCard}>
@@ -484,29 +566,80 @@ export default function VolunteerDashboard({ userData, onLogout }) {
                       <Text style={styles.detailValue}>{d.quantity || 'N/A'}</Text>
                     </View>
 
-                    {/* Pickup Location */}
+                    {/* Map View with Route */}
+                    {hasValidLocations && mapRegion ? (
+                      <View style={styles.mapContainer}>
+                        <MapView
+                          style={styles.map}
+                          initialRegion={mapRegion}
+                          scrollEnabled={true}
+                          zoomEnabled={true}
+                        >
+                          {/* Pickup Marker (Donor) */}
+                          <Marker
+                            coordinate={{ latitude: pickupLat, longitude: pickupLon }}
+                            title="Pickup Location"
+                            description={locations.donor?.name || 'Donor'}
+                            pinColor="red"
+                          >
+                            <View style={styles.markerContainer}>
+                              <FontAwesome5 name="map-marker-alt" size={30} color="#d32f2f" />
+                            </View>
+                          </Marker>
+
+                          {/* Dropoff Marker (Beneficiary) */}
+                          <Marker
+                            coordinate={{ latitude: dropLat, longitude: dropLon }}
+                            title="Dropoff Location"
+                            description={locations.beneficiary?.name || 'Beneficiary'}
+                            pinColor="blue"
+                          >
+                            <View style={styles.markerContainer}>
+                              <FontAwesome5 name="flag-checkered" size={30} color="#1976d2" />
+                            </View>
+                          </Marker>
+
+                          {/* Route Line */}
+                          <Polyline
+                            coordinates={[
+                              { latitude: pickupLat, longitude: pickupLon },
+                              { latitude: dropLat, longitude: dropLon },
+                            ]}
+                            strokeColor="#2e7d32"
+                            strokeWidth={3}
+                            lineDashPattern={[5, 5]}
+                          />
+                        </MapView>
+                      </View>
+                    ) : (
+                      <View style={styles.loadingMapContainer}>
+                        <FontAwesome5 name="map" size={40} color="#bdbdbd" />
+                        <Text style={styles.loadingMapText}>Loading locations...</Text>
+                      </View>
+                    )}
+
+                    {/* Location Details */}
                     <View style={styles.locationSection}>
                       <View style={styles.locationHeader}>
                         <FontAwesome5 name="map-marker-alt" size={16} color="#d32f2f" />
-                        <Text style={styles.locationTitle}>Pickup (Donor)</Text>
+                        <Text style={styles.locationTitle}>Pickup: {locations.donor?.name || 'Donor'}</Text>
                       </View>
                       <Text style={styles.locationText}>
                         {pickupLat && pickupLon 
                           ? `${pickupLat.toFixed(4)}°, ${pickupLon.toFixed(4)}°`
-                          : 'Location not available'}
+                          : 'Fetching location...'}
                       </Text>
                     </View>
 
-                    {/* Drop Location */}
                     <View style={styles.locationSection}>
                       <View style={styles.locationHeader}>
                         <FontAwesome5 name="flag-checkered" size={16} color="#1976d2" />
-                        <Text style={styles.locationTitle}>Dropoff (Beneficiary)</Text>
+                        <Text style={styles.locationTitle}>Dropoff: {locations.beneficiary?.name || 'Beneficiary'}</Text>
                       </View>
                       <Text style={styles.locationText}>
                         {dropLat && dropLon 
                           ? `${dropLat.toFixed(4)}°, ${dropLon.toFixed(4)}°`
-                          : 'Location not available'}
+                          : 'Fetching location...'}
                       </Text>
                     </View>
 
@@ -1228,6 +1361,40 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     marginTop: 16,
     gap: 8,
+  },
+  mapContainer: {
+    width: '100%',
+    height: 250,
+    borderRadius: 12,
+    overflow: 'hidden',
+    marginVertical: 12,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  map: {
+    width: '100%',
+    height: '100%',
+  },
+  markerContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingMapContainer: {
+    width: '100%',
+    height: 250,
+    borderRadius: 12,
+    backgroundColor: '#f5f5f5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 12,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  loadingMapText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: '#757575',
+    fontStyle: 'italic',
   },
   toggleContainerFixed: {
     flexDirection: 'row',
