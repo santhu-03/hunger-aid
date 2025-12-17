@@ -441,7 +441,7 @@ export default function VolunteerDashboard({ userData, onLogout }) {
         />
       ) : activeMenu === 'Transport Requests' ? (
         <View style={styles.emptyContent}>
-          <View style={styles.toggleContainer}>
+          <View style={styles.toggleContainerFixed}>
             <Text style={styles.toggleLabel}>
               {transportToggle ? 'Active' : 'Inactive'}
             </Text>
@@ -454,30 +454,100 @@ export default function VolunteerDashboard({ userData, onLogout }) {
               <View style={[styles.toggleThumb, transportToggle && styles.toggleThumbActive]} />
             </TouchableOpacity>
           </View>
-          <Text style={styles.emptyText}>Transport Requests</Text>
-          {pendingDonations.length > 0 ? (
-            <View style={{ width: '100%', paddingHorizontal: 16, marginTop: 8 }}>
-              {pendingDonations.map((d) => (
-                <View key={d.id} style={{ backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 10 }}>
-                  <Text style={{ fontWeight: 'bold', color: '#1b5e20', marginBottom: 4 }}>Donation: {d.foodItem || d.title || d.id}</Text>
-                  <Text style={{ color: '#555' }}>Status: {d.deliveryStatus}</Text>
-                  <View style={{ flexDirection: 'row', marginTop: 10 }}>
-                    <TouchableOpacity style={[styles.reqBtn, styles.reqBtnPrimary]} onPress={() => handleAcceptDelivery(d.id)}>
-                      <Text style={styles.reqBtnText}>Accept Delivery</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={[styles.reqBtn, styles.reqBtnDanger]} onPress={() => handleRejectDelivery(d.id)}>
-                      <Text style={styles.reqBtnText}>Reject</Text>
-                    </TouchableOpacity>
+          <View style={styles.requestsContentContainer}>
+            <Text style={styles.deliveryRequestsTitle}>Delivery Requests</Text>
+            {pendingDonations.length > 0 ? (
+              <ScrollView style={styles.requestsScrollView} contentContainerStyle={styles.requestsScrollContent}>
+              {pendingDonations.map((d) => {
+                const pickupLat = d.location?.latitude;
+                const pickupLon = d.location?.longitude;
+                const dropLat = d.dropLocation?.latitude;
+                const dropLon = d.dropLocation?.longitude;
+                const distance = d.distance || (pickupLat && dropLat ? 
+                  Math.sqrt(Math.pow(pickupLat - dropLat, 2) + Math.pow(pickupLon - dropLon, 2)) * 111 : 0);
+                
+                return (
+                  <View key={d.id} style={styles.deliveryCard}>
+                    {/* Food Item Header */}
+                    <View style={styles.deliveryHeader}>
+                      <FontAwesome5 name="utensils" size={20} color="#2e7d32" />
+                      <Text style={styles.deliveryTitle}>{d.foodItem || 'Food Item'}</Text>
+                    </View>
+
+                    {/* Food Details */}
+                    <View style={styles.deliveryDetailRow}>
+                      <Text style={styles.detailLabel}>Type:</Text>
+                      <Text style={styles.detailValue}>{d.foodType || 'N/A'}</Text>
+                    </View>
+                    <View style={styles.deliveryDetailRow}>
+                      <Text style={styles.detailLabel}>Quantity:</Text>
+                      <Text style={styles.detailValue}>{d.quantity || 'N/A'}</Text>
+                    </View>
+
+                    {/* Pickup Location */}
+                    <View style={styles.locationSection}>
+                      <View style={styles.locationHeader}>
+                        <FontAwesome5 name="map-marker-alt" size={16} color="#d32f2f" />
+                        <Text style={styles.locationTitle}>Pickup (Donor)</Text>
+                      </View>
+                      <Text style={styles.locationText}>
+                        {pickupLat && pickupLon 
+                          ? `${pickupLat.toFixed(4)}°, ${pickupLon.toFixed(4)}°`
+                          : 'Location not available'}
+                      </Text>
+                    </View>
+
+                    {/* Drop Location */}
+                    <View style={styles.locationSection}>
+                      <View style={styles.locationHeader}>
+                        <FontAwesome5 name="flag-checkered" size={16} color="#1976d2" />
+                        <Text style={styles.locationTitle}>Dropoff (Beneficiary)</Text>
+                      </View>
+                      <Text style={styles.locationText}>
+                        {dropLat && dropLon 
+                          ? `${dropLat.toFixed(4)}°, ${dropLon.toFixed(4)}°`
+                          : 'Location not available'}
+                      </Text>
+                    </View>
+
+                    {/* Distance Info */}
+                    {distance > 0 && (
+                      <View style={styles.distanceInfo}>
+                        <FontAwesome5 name="route" size={14} color="#757575" />
+                        <Text style={styles.distanceText}>
+                          Est. Distance: ~{distance.toFixed(2)} km
+                        </Text>
+                      </View>
+                    )}
+
+                    {/* Action Buttons */}
+                    <View style={styles.deliveryActions}>
+                      <TouchableOpacity 
+                        style={[styles.reqBtn, styles.reqBtnPrimary]} 
+                        onPress={() => handleAcceptDelivery(d.id)}
+                      >
+                        <FontAwesome5 name="check-circle" size={16} color="#fff" />
+                        <Text style={styles.reqBtnText}>Accept Delivery</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        style={[styles.reqBtn, styles.reqBtnDanger]} 
+                        onPress={() => handleRejectDelivery(d.id)}
+                      >
+                        <FontAwesome5 name="times-circle" size={16} color="#fff" />
+                        <Text style={styles.reqBtnText}>Reject</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
-                </View>
-              ))}
-            </View>
+                );
+              })}
+            </ScrollView>
           ) : (
-            <Text style={styles.updatingText}>No pending requests right now.</Text>
+            <Text style={styles.noRequestsText}>No pending delivery requests right now.</Text>
           )}
           {isUpdatingLocation && (
             <Text style={styles.updatingText}>Updating location...</Text>
           )}
+          </View>
         </View>
       ) : (
         <>
@@ -1065,21 +1135,138 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   reqBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     borderRadius: 8,
-    marginRight: 8,
+    marginHorizontal: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
   },
   reqBtnPrimary: { backgroundColor: '#2e7d32' },
   reqBtnDanger: { backgroundColor: '#e53935' },
-  reqBtnText: { color: '#fff', fontWeight: '600' },
-  toggleContainer: {
-    position: 'absolute',
-    top: 20,
-    right: 20,
+  reqBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
+  deliveryCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  deliveryHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginBottom: 12,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  deliveryTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#2e7d32',
+    marginLeft: 10,
+  },
+  deliveryDetailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+  },
+  detailLabel: {
+    fontSize: 14,
+    color: '#757575',
+    fontWeight: '600',
+  },
+  detailValue: {
+    fontSize: 14,
+    color: '#333',
+    fontWeight: '500',
+  },
+  locationSection: {
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+  },
+  locationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  locationTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#424242',
+    marginLeft: 8,
+  },
+  locationText: {
+    fontSize: 13,
+    color: '#616161',
+    marginLeft: 24,
+  },
+  distanceInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#e0e0e0',
+  },
+  distanceText: {
+    fontSize: 13,
+    color: '#757575',
+    marginLeft: 8,
+    fontStyle: 'italic',
+  },
+  deliveryActions: {
+    flexDirection: 'row',
+    marginTop: 16,
+    gap: 8,
+  },
+  toggleContainerFixed: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: '#f5f5f5',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
     gap: 10,
+    zIndex: 10,
+  },
+  requestsContentContainer: {
+    flex: 1,
+    width: '100%',
+  },
+  deliveryRequestsTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#2e7d32',
+    textAlign: 'center',
+    paddingVertical: 16,
+    backgroundColor: '#fff',
+  },
+  requestsScrollView: {
+    flex: 1,
+    width: '100%',
+  },
+  requestsScrollContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 20,
+  },
+  noRequestsText: {
+    fontSize: 16,
+    color: '#757575',
+    textAlign: 'center',
+    marginTop: 40,
+    fontStyle: 'italic',
   },
   toggleLabel: {
     fontSize: 16,
