@@ -1,9 +1,9 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { getAuth } from 'firebase/auth';
-import { collection, getFirestore, onSnapshot, query, where } from 'firebase/firestore';
+import { collection, doc, getFirestore, onSnapshot, query, where } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { app } from '../firebaseConfig'; // adjust path as needed
 import BeneficiaryProfile from '../profile/BeneficiaryProfile';
 import BDonationScreen from './BDonationScreen';
@@ -26,6 +26,22 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
   const [firstName, setFirstName] = useState(userData.name ? userData.name.split(' ')[0] : '');
   const [lastName, setLastName] = useState(userData.name ? userData.name.split(' ')[1] || '' : '');
   const [pendingOffer, setPendingOffer] = useState(null);
+
+  // Enforce access restriction if blocked
+  useEffect(() => {
+    const db = getFirestore();
+    const uid = userData?.uid;
+    if (!uid) return;
+    const unsub = onSnapshot(doc(db, 'users', uid), (snap) => {
+      if (snap.exists()) {
+        const status = snap.data()?.status;
+        if (status === 'blocked') {
+          Alert.alert('Access Restricted', 'Your account has been blocked by the admin.');
+        }
+      }
+    });
+    return () => unsub();
+  }, [userData?.uid]);
 
   // Use donor-style feed cards
   const feedCards = [

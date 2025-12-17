@@ -2,8 +2,14 @@
 const { onRequest } = require("firebase-functions/v2/https");
 const {onDocumentCreated, onDocumentUpdated} = require("firebase-functions/v2/firestore");
 const {initializeApp} = require("firebase-admin/app");
+const {getAuth} = require("firebase-admin/auth");
 const {getFirestore, FieldValue, Timestamp} = require("firebase-admin/firestore");
 const {getMessaging} = require("firebase-admin/messaging");
+const {onSchedule} = require("firebase-functions/v2/scheduler");
+
+// Tunables
+const MAX_VOLUNTEER_RESPONSE_SECONDS = 60; // TTL for a volunteer to respond
+const MAX_ASSIGNMENT_BATCH = 20; // Safety cap per scheduler run
 
 // Initialize the Firebase Admin SDK
 initializeApp();
@@ -171,43 +177,9 @@ exports.onDonationUpdate = onDocumentUpdated("donations/{donationId}", async (ev
     }
   }
 
-  // Existing logic for assigning volunteer after acceptance
+  // Assign volunteer workflow: when beneficiary accepts the donation create / update delivery task
   if (before.status !== "Accepted" && after.status === "Accepted" && after.beneficiaryId) {
-    const beneficiarySnap = await db.doc(`users/${after.beneficiaryId}`).get();
-    const beneficiary = beneficiarySnap.data();
-    const volunteersSnap = await db.collection("users").where("role", "==", "volunteer").where("available", "==", true).get();
-
-    let nearestVolunteer = null;
-    let minDist = Infinity;
-    volunteersSnap.forEach((doc) => {
-      const v = doc.data();
-      if (v.location) {
-        const dist = getDistanceKm(after.location.latitude, after.location.longitude, v.location.latitude, v.location.longitude);
-        if (dist < minDist) {
-          minDist = dist;
-          nearestVolunteer = {id: doc.id, ...v};
-        }
-      }
-    });
-
-    const deliveryTaskData = {
-      donationId,
-      pickupLocation: {address: after.pickupAddress, coordinates: after.location},
-      dropoffLocation: {address: beneficiary.address, coordinates: beneficiary.location},
-      donorContact: after.donorContact || "",
-      beneficiaryContact: beneficiary.contact || "",
-      totalDistance: minDist,
-      estimatedTime: Math.round(minDist * 4),
-      status: "Pending",
-      createdAt: FieldValue.serverTimestamp(),
-    };
-
-    if (nearestVolunteer) {
-      deliveryTaskData.volunteerId = nearestVolunteer.id;
-      deliveryTaskData.status = "Offered";
-    }
-
-    return db.collection("deliveryTasks").add(deliveryTaskData);
+    return createDeliveryTaskForDonation({ db, donationId, donation: after });
   }
   return null;
 });
@@ -218,8 +190,9 @@ exports.onTaskUpdate = onDocumentUpdated("deliveryTasks/{taskId}", async (event)
   const after = event.data.after.data();
   const db = getFirestore();
 
+  // Volunteer accepted the task
   if (before.status !== "Accepted" && after.status === "Accepted" && after.volunteerId) {
-    await db.doc(`donations/${after.donationId}`).update({status: "Assigned"});
+    await db.doc(`donations/${after.donationId}`).update({status: "Assigned", assignedVolunteerId: after.volunteerId});
 
     const donationSnap = await db.doc(`donations/${after.donationId}`).get();
     const donation = donationSnap.data();
@@ -246,7 +219,139 @@ exports.onTaskUpdate = onDocumentUpdated("deliveryTasks/{taskId}", async (event)
       return messaging.sendToDevice(tokensToSend, payload);
     }
   }
+
+  // If a task was rejected, immediately try to move to the next volunteer
+  if (before.status !== "Rejected" && after.status === "Rejected") {
+    const taskRef = event.data.after.ref;
+    await reassignTaskToNextVolunteer(db, taskRef, after, "volunteer rejected");
+  }
   return null;
+});
+
+// Scheduled reassigner for timed-out offers
+exports.reassignTimedOutTasks = onSchedule("every 1 minutes", async () => {
+  const db = getFirestore();
+  const now = Timestamp.now();
+  const timedOut = await db
+    .collection("deliveryTasks")
+    .where("status", "==", "Offered")
+    .where("offerExpiry", "<=", now)
+    .limit(MAX_ASSIGNMENT_BATCH)
+    .get();
+
+  for (const docSnap of timedOut.docs) {
+    await reassignTaskToNextVolunteer(db, docSnap.ref, docSnap.data(), "timeout");
+  }
+});
+
+// HTTP: volunteer accepts a task using a transaction to avoid races
+exports.acceptDeliveryTask = onRequest(async (req, res) => {
+  if (req.method !== "POST") return res.status(405).send("Method not allowed");
+  const authCtx = await verifyAuth(req, res);
+  if (!authCtx) return; // verifyAuth already sent response
+
+  const { taskId } = req.body || {};
+  if (!taskId) return res.status(400).json({ error: "Missing taskId" });
+
+  const db = getFirestore();
+  try {
+    await db.runTransaction(async (tx) => {
+      const taskRef = db.doc(`deliveryTasks/${taskId}`);
+      const snap = await tx.get(taskRef);
+      if (!snap.exists) throw new Error("Task not found");
+      const task = snap.data();
+      if (task.currentVolunteerId !== authCtx.uid) throw new Error("Not assigned to you");
+      if (task.status !== "Offered") throw new Error("Task is not open");
+      if (task.offerExpiry && task.offerExpiry.toMillis() <= Date.now()) throw new Error("Offer expired");
+
+      tx.update(taskRef, {
+        status: "Accepted",
+        volunteerId: authCtx.uid,
+        acceptedAt: Timestamp.now(),
+        assignmentLog: FieldValue.arrayUnion({
+          at: Timestamp.now(),
+          action: "accepted",
+          volunteerId: authCtx.uid,
+        })
+      });
+      tx.update(db.doc(`users/${authCtx.uid}`), { availability: "busy" });
+      tx.update(db.doc(`donations/${task.donationId}`), { assignedVolunteerId: authCtx.uid, status: "Assigned" });
+    });
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// HTTP: volunteer rejects a task and triggers reassignment
+exports.rejectDeliveryTask = onRequest(async (req, res) => {
+  if (req.method !== "POST") return res.status(405).send("Method not allowed");
+  const authCtx = await verifyAuth(req, res);
+  if (!authCtx) return;
+
+  const { taskId, reason = "" } = req.body || {};
+  if (!taskId) return res.status(400).json({ error: "Missing taskId" });
+
+  const db = getFirestore();
+  let nextVolunteerId = null;
+  try {
+    await db.runTransaction(async (tx) => {
+      const taskRef = db.doc(`deliveryTasks/${taskId}`);
+      const snap = await tx.get(taskRef);
+      if (!snap.exists) throw new Error("Task not found");
+      const task = snap.data();
+      if (task.currentVolunteerId !== authCtx.uid) throw new Error("Not assigned to you");
+
+      const rejected = new Set(task.rejectedVolunteers || []);
+      rejected.add(authCtx.uid);
+      const candidateQueue = task.candidateQueue || [];
+      const nextIdx = getNextCandidateIndex({
+        candidateQueue,
+        currentCandidateIndex: task.currentCandidateIndex,
+        rejectedVolunteers: Array.from(rejected),
+      });
+
+      const baseUpdate = {
+        rejectedVolunteers: Array.from(rejected),
+        assignmentLog: FieldValue.arrayUnion({
+          at: Timestamp.now(),
+          action: "rejected",
+          volunteerId: authCtx.uid,
+          reason,
+        })
+      };
+
+      if (nextIdx === null) {
+        tx.update(taskRef, {
+          ...baseUpdate,
+          status: "Unassigned",
+          currentVolunteerId: null,
+          currentCandidateIndex: task.currentCandidateIndex,
+        });
+      } else {
+        const next = candidateQueue[nextIdx];
+        nextVolunteerId = next.id;
+        tx.update(taskRef, {
+          ...baseUpdate,
+          status: "Offered",
+          currentVolunteerId: next.id,
+          currentCandidateIndex: nextIdx,
+          offerExpiry: Timestamp.fromMillis(Date.now() + MAX_VOLUNTEER_RESPONSE_SECONDS * 1000),
+        });
+      }
+
+      tx.update(db.doc(`users/${authCtx.uid}`), { availability: "available" });
+    });
+
+    if (nextVolunteerId) {
+      await sendVolunteerNotification(getFirestore(), nextVolunteerId, taskId);
+    } else {
+      await notifyAdminNoVolunteer(getFirestore(), taskId, "No volunteer after rejection");
+    }
+    res.status(200).json({ ok: true, reassignedTo: nextVolunteerId || null });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Add this HTTP function for testing donation creation
@@ -270,3 +375,166 @@ exports.createDonation = onRequest(async (req, res) => {
     res.status(500).send("Internal error");
   }
 });
+
+// ------------------------
+// Helpers
+// ------------------------
+
+async function createDeliveryTaskForDonation({ db, donationId, donation }) {
+  const beneficiarySnap = await db.doc(`users/${donation.beneficiaryId}`).get();
+  const beneficiary = beneficiarySnap.data() || {};
+
+  const candidates = await fetchAvailableVolunteers(db, donation.location);
+  const candidateQueue = candidates.map((c) => ({ id: c.id, distanceKm: c.distanceKm }));
+  const first = candidateQueue[0] || null;
+
+  const pickupAddress = donation.pickupAddress || "Pickup location";
+  const dropoffAddress = beneficiary.address || "Beneficiary location";
+  const dropoffCoords = beneficiary.location || donation.beneficiaryLocation || null;
+
+  const taskRef = db.collection("deliveryTasks").doc(donationId);
+  await taskRef.set({
+    donationId,
+    donorId: donation.donorId || null,
+    beneficiaryId: donation.beneficiaryId || null,
+    pickupLocation: { address: pickupAddress, coordinates: donation.location },
+    dropoffLocation: { address: dropoffAddress, coordinates: dropoffCoords },
+    donorContact: donation.donorContact || "",
+    beneficiaryContact: beneficiary.contact || "",
+    foodSummary: `${donation.quantity || ""} ${donation.foodType || ""} ${donation.foodItem || ""}`.trim(),
+    candidateQueue,
+    rejectedVolunteers: [],
+    currentCandidateIndex: first ? 0 : -1,
+    currentVolunteerId: first ? first.id : null,
+    status: first ? "Offered" : "Unassigned",
+    offerExpiry: first ? Timestamp.fromMillis(Date.now() + MAX_VOLUNTEER_RESPONSE_SECONDS * 1000) : null,
+    createdAt: FieldValue.serverTimestamp(),
+    assignmentLog: [{
+      at: Timestamp.now(),
+      action: "task_created",
+      candidateCount: candidateQueue.length,
+    }],
+  });
+
+  if (first) {
+    await sendVolunteerNotification(db, first.id, donationId);
+  } else {
+    await notifyAdminNoVolunteer(db, donationId, "No volunteers available for assignment");
+  }
+}
+
+async function fetchAvailableVolunteers(db, pickupLocation) {
+  const volunteersSnap = await db
+    .collection("users")
+    .where("role", "==", "volunteer")
+    .get();
+
+  const candidates = [];
+  volunteersSnap.forEach((docSnap) => {
+    const v = docSnap.data();
+    const availabilityString = (v.availability || "").toString().toLowerCase();
+    const isAvailable = v.available === true || availabilityString === "available" || availabilityString === "";
+    if (!isAvailable) return;
+
+    if (v.location && typeof v.location.latitude === "number" && typeof v.location.longitude === "number") {
+      const distanceKm = getDistanceKm(
+        pickupLocation.latitude,
+        pickupLocation.longitude,
+        v.location.latitude,
+        v.location.longitude
+      );
+      candidates.push({ id: docSnap.id, distanceKm, fcmToken: v.fcmToken || null });
+    }
+  });
+  candidates.sort((a, b) => a.distanceKm - b.distanceKm);
+  return candidates;
+}
+
+function getNextCandidateIndex(task) {
+  const rejected = new Set(task.rejectedVolunteers || []);
+  const start = (task.currentCandidateIndex ?? -1) + 1;
+  for (let idx = start; idx < (task.candidateQueue || []).length; idx++) {
+    const candidate = task.candidateQueue[idx];
+    if (candidate && !rejected.has(candidate.id)) return idx;
+  }
+  return null;
+}
+
+async function reassignTaskToNextVolunteer(db, taskRef, task, reason) {
+  const nextIdx = getNextCandidateIndex(task);
+  const updates = {
+    assignmentLog: FieldValue.arrayUnion({
+      at: Timestamp.now(),
+      action: "reassign",
+      fromVolunteer: task.currentVolunteerId || null,
+      reason,
+    }),
+  };
+
+  if (task.currentVolunteerId) {
+    updates.rejectedVolunteers = FieldValue.arrayUnion(task.currentVolunteerId);
+  }
+
+  if (nextIdx === null) {
+    await taskRef.update({
+      ...updates,
+      status: "Unassigned",
+      currentVolunteerId: null,
+    });
+    await notifyAdminNoVolunteer(db, taskRef.id, reason || "No remaining volunteers");
+    return;
+  }
+
+  const next = task.candidateQueue[nextIdx];
+  await taskRef.update({
+    ...updates,
+    status: "Offered",
+    currentVolunteerId: next.id,
+    currentCandidateIndex: nextIdx,
+    offerExpiry: Timestamp.fromMillis(Date.now() + MAX_VOLUNTEER_RESPONSE_SECONDS * 1000),
+  });
+  await sendVolunteerNotification(db, next.id, task.donationId || taskRef.id);
+}
+
+async function sendVolunteerNotification(db, volunteerId, donationId) {
+  const userSnap = await db.doc(`users/${volunteerId}`).get();
+  const user = userSnap.data();
+  if (!user || !user.fcmToken) return;
+  const messaging = getMessaging();
+  const payload = {
+    notification: {
+      title: "New Delivery Task",
+      body: "You have been assigned a nearby pickup. Please accept or reject.",
+    },
+    data: {
+      type: "delivery_task",
+      donationId,
+    },
+  };
+  await messaging.sendToDevice(user.fcmToken, payload);
+}
+
+async function notifyAdminNoVolunteer(db, donationId, message) {
+  await db.collection("notifications").add({
+    type: "assignment_failure",
+    donationId,
+    message,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+}
+
+async function verifyAuth(req, res) {
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) {
+    res.status(401).json({ error: "Missing bearer token" });
+    return null;
+  }
+  const token = header.replace("Bearer ", "").trim();
+  try {
+    const decoded = await getAuth().verifyIdToken(token);
+    return decoded;
+  } catch (err) {
+    res.status(401).json({ error: "Invalid token" });
+    return null;
+  }
+}

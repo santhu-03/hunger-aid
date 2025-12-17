@@ -59,7 +59,15 @@ export default function App() {
           const docRef = doc(db, 'users', u.uid);
           const docSnap = await getDoc(docRef);
           if (docSnap.exists()) {
-            setUserData(docSnap.data() as UserData);
+            const data = docSnap.data() as UserData;
+            if ((data as any)?.status && (data as any).status === 'blocked') {
+              await signOut(auth);
+              setUser(null);
+              setUserData(null);
+              Alert.alert('Access Restricted', 'Your account is blocked. Please contact support.');
+            } else {
+              setUserData(data);
+            }
           }
         } catch (e) {
           console.error('Error fetching user document:', e);
@@ -92,6 +100,13 @@ export default function App() {
       const docSnap = await getDoc(docRef);
       if (docSnap.exists()) {
         const userRole = docSnap.data().role;
+        const userStatus = (docSnap.data() as any).status;
+        if (userStatus === 'blocked') {
+          setErrorMsg('Your account is blocked. Please contact support.');
+          setPending(false);
+          await signOut(auth);
+          return;
+        }
         if (userRole !== role) {
           setErrorMsg(`This account is registered as "${userRole}". Please select the correct role to login.`);
           setPending(false);
@@ -161,6 +176,8 @@ export default function App() {
         name,
         email,
         role,
+        // Default volunteers to available so they can be matched immediately
+        availability: role === 'Volunteer' ? 'available' : null,
         location: latitude && longitude ? { latitude, longitude } : null,
         createdAt: serverTimestamp(),
       });

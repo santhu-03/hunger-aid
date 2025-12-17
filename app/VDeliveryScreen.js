@@ -75,7 +75,18 @@ import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-nati
 import MapView, { Marker, Polyline } from 'react-native-maps';
 
 export default function VDeliveryScreen({ deliveryTaskDetails, onAccept, onReject }) {
-  const [timeLeft, setTimeLeft] = useState(600);
+  const computeInitialSeconds = () => {
+    if (deliveryTaskDetails?.offerExpiry?.toMillis) {
+      return Math.max(Math.floor((deliveryTaskDetails.offerExpiry.toMillis() - Date.now()) / 1000), 0);
+    }
+    return 600;
+  };
+
+  const [timeLeft, setTimeLeft] = useState(computeInitialSeconds());
+
+  useEffect(() => {
+    setTimeLeft(computeInitialSeconds());
+  }, [deliveryTaskDetails?.offerExpiry]);
 
   useEffect(() => {
     if (timeLeft <= 0) {

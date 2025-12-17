@@ -1,65 +1,147 @@
-Act as a senior Firebase + backend architect.
+Context
 
-Implement an end-to-end food delivery assignment system for the HungerAid app using Firebase (Firestore + Cloud Functions).
+I already have a React Native (Expo) application using Firebase.
+The Volunteer Dashboard → Transport Requests screen already exists and is functional.
+Transport requests are created when a Beneficiary accepts a donation.
 
-SCENARIO:
-1. A donor creates a food donation with pickup location (latitude, longitude).
-2. A beneficiary accepts the food.
-3. Once accepted:
-   - The system must automatically find the NEAREST available volunteer.
-   - The delivery task must be assigned to that volunteer.
-4. The volunteer must have the option to:
-   - ACCEPT the task → task status becomes "in_progress"
-   - REJECT the task → system assigns the task to the next nearest volunteer.
-5. If no volunteer accepts, mark task as "unassigned" and notify admin.
+Now I want to enhance the UI/UX of the Transport Requests screen to give volunteers clear delivery information, including donor & beneficiary locations, food details, and action buttons.
 
-REQUIREMENTS:
-- Use Firestore for data storage.
-- Use Firebase Cloud Functions for backend logic.
-- Use Expo push notifications to notify volunteers.
-- Volunteers must be filtered by:
-  - Availability status = "available"
-  - Role = "volunteer"
-  - Distance from pickup location (nearest first)
-- Prevent race conditions (two volunteers accepting same task).
-- Ensure secure role-based access.
+🎯 Objective
 
-DATA MODEL:
-Design Firestore collections for:
-- users (with role, availability, lastKnownLocation)
-- donations
-- deliveryTasks
-- notifications
+Improve the Transport Requests UI so that each request clearly shows:
 
-WORKFLOW LOGIC:
-1. Beneficiary clicks "Accept Food"
-2. Firestore trigger runs:
-   - Create deliveryTask
-   - Query volunteers ordered by distance
-3. Assign task to nearest volunteer
-4. Send push notification to volunteer
-5. Volunteer response:
-   - Accept → lock task to volunteer
-   - Reject → update task + reassign to next nearest volunteer
+Donation details
 
-TECHNICAL REQUIREMENTS:
-- Use GeoPoint for locations
-- Use Haversine formula or geohash-based querying
-- Use Firestore transactions for accept/reject
-- Add TTL / timeout if volunteer does not respond
-- Log assignment attempts
+Donor & beneficiary locations (map or location preview)
 
-DELIVERABLES:
-1. Firestore schema (collections & fields)
-2. Cloud Function code (assignment & reassignment)
-3. React Native logic for:
-   - Beneficiary accept action
-   - Volunteer accept/reject UI
-4. Firestore security rules
-5. Required Firestore indexes
-6. Error handling & edge cases
+Food information
 
-- Reassign task automatically after 60 seconds if no response
-- Show ETA to beneficiary
-- Track volunteer live location
-- Admin override assignment
+Accept / Reject delivery actions
+
+All data must remain real-time from Firebase
+
+🧱 UI STRUCTURE (PER TRANSPORT REQUEST CARD)
+1️⃣ Donation Summary Card
+
+Each transport request should be displayed as a clean card containing:
+
+📦 Donation Information
+
+Food type (Veg / Non-Veg)
+
+Food name / category
+
+Quantity (plates / kg / persons)
+
+Packed time / pickup deadline
+
+Any donor notes (optional)
+
+Example fields from Firebase:
+
+{
+  "foodType": "Veg",
+  "foodItems": ["Rice", "Dal"],
+  "quantity": "10 plates",
+  "pickupBefore": timestamp,
+  "instructions": "Handle carefully"
+}
+
+2️⃣ Donor & Beneficiary Location Section
+🗺️ Map / Location Preview
+
+Show mini map view OR location cards with:
+
+📍 Donor Pickup Location
+
+📍 Beneficiary Drop Location
+
+Options:
+
+Use react-native-maps (preferred)
+
+OR show address + distance if map already exists
+
+Each location should show:
+
+Address / landmark
+
+Distance from volunteer (if available)
+
+3️⃣ Volunteer Actions
+
+Below each card:
+
+✅ Accept Delivery Button
+
+Confirms assignment
+
+Updates Firebase:
+
+"deliveryStatus": "accepted_by_volunteer"
+
+❌ Reject Delivery Button
+
+Rejects assignment
+
+Triggers reassignment logic
+
+Buttons must:
+
+Disable once action is taken
+
+Update UI in real time
+
+4️⃣ Real-Time Status Indicator
+
+Show current delivery status:
+
+Pending
+
+Accepted
+
+In Transit
+
+Update instantly using Firebase listeners
+
+🔄 Real-Time Data Requirements
+
+Use Firebase onSnapshot listeners
+
+Any update must reflect instantly:
+
+Donation acceptance
+
+Volunteer response
+
+Status changes
+
+No manual refresh.
+
+⚙️ Technical Constraints
+
+Do NOT change existing navigation
+
+Do NOT break current Firebase structure
+
+Reuse existing donation & user collections
+
+UI update only (logic already exists)
+
+
+
+✅ Expected Outcome
+
+Volunteers see rich, clear transport request cards
+
+Each request includes:
+
+Food details
+
+Donor & beneficiary locations
+
+Map or location preview
+
+Accept / Reject actions
+
+UI feels professional, informative, and delivery-ready

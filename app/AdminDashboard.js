@@ -1,15 +1,12 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
-import React, { useState } from 'react';
-import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { deleteUser, listenAllUsers, updateUserRole, updateUserStatus } from '../services/userService';
 
 // Sidebar navigation options
 const sidebarOptions = [
   { icon: 'chart-bar', label: 'Dashboard' },
-  { icon: 'users', label: 'User Management', sub: [
-    { icon: 'user', label: 'Donors' },
-    { icon: 'user-friends', label: 'Beneficiaries' },
-    { icon: 'user-clock', label: 'Volunteers' },
-  ]},
+  { icon: 'users', label: 'User Management' },
   { icon: 'edit', label: 'Content Management', sub: [
     { icon: 'bullhorn', label: 'Campaigns' },
     { icon: 'calendar-alt', label: 'Events' },
@@ -31,6 +28,10 @@ const sidebarOptions = [
 export default function AdminDashboard({ userData, onLogout }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeSection, setActiveSection] = useState('Dashboard');
+  const [activeUserTab, setActiveUserTab] = useState('Donors');
+  const [users, setUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [pendingUserId, setPendingUserId] = useState(null);
 
   // Example KPI data
   const kpis = [
@@ -54,6 +55,17 @@ export default function AdminDashboard({ userData, onLogout }) {
     { text: '5 Volunteer Hours to Approve', important: false },
   ];
 
+  // Subscribe to users when in User Management
+  useEffect(() => {
+    if (activeSection !== 'User Management') return;
+    setUsersLoading(true);
+    const unsub = listenAllUsers((list) => {
+      setUsers(list);
+      setUsersLoading(false);
+    });
+    return () => unsub();
+  }, [activeSection]);
+
   return (
     <View style={styles.root}>
       {/* Sidebar */}
@@ -75,7 +87,14 @@ export default function AdminDashboard({ userData, onLogout }) {
               {!sidebarCollapsed && opt.sub && activeSection === opt.label && (
                 <View style={styles.sidebarSubMenu}>
                   {opt.sub.map(sub => (
-                    <TouchableOpacity key={sub.label} style={styles.sidebarSubItem}>
+                    <TouchableOpacity
+                      key={sub.label}
+                      style={styles.sidebarSubItem}
+                      onPress={() => {
+                        setActiveSection('User Management');
+                        setActiveUserTab(sub.label);
+                      }}
+                    >
                       <FontAwesome5 name={sub.icon} size={14} color="#fff" style={{ marginRight: 10 }} />
                       <Text style={styles.sidebarSubItemText}>{sub.label}</Text>
                     </TouchableOpacity>
@@ -109,49 +128,168 @@ export default function AdminDashboard({ userData, onLogout }) {
         </View>
         {/* Main Content */}
         <ScrollView contentContainerStyle={styles.mainContent}>
-          {/* KPI Cards */}
-          <View style={styles.kpiRow}>
-            {kpis.map(kpi => (
-              <View key={kpi.label} style={styles.kpiCard}>
-                <FontAwesome5 name={kpi.icon} size={28} color="#2e7d32" style={{ marginBottom: 8 }} />
-                <Text style={styles.kpiValue}>{kpi.value}</Text>
-                <Text style={styles.kpiLabel}>{kpi.label}</Text>
-                <Text style={[styles.kpiChange, kpi.change.startsWith('+') ? styles.kpiChangeUp : styles.kpiChangeDown]}>{kpi.change}</Text>
+          {activeSection !== 'User Management' ? (
+            <>
+              {/* KPI Cards */}
+              <View style={styles.kpiRow}>
+                {kpis.map(kpi => (
+                  <View key={kpi.label} style={styles.kpiCard}>
+                    <FontAwesome5 name={kpi.icon} size={28} color="#2e7d32" style={{ marginBottom: 8 }} />
+                    <Text style={styles.kpiValue}>{kpi.value}</Text>
+                    <Text style={styles.kpiLabel}>{kpi.label}</Text>
+                    <Text style={[styles.kpiChange, kpi.change.startsWith('+') ? styles.kpiChangeUp : styles.kpiChangeDown]}>{kpi.change}</Text>
+                  </View>
+                ))}
               </View>
-            ))}
-          </View>
-          {/* Donation Trends Chart (placeholder) */}
-          <View style={styles.chartCard}>
-            <Text style={styles.chartTitle}>Donation Trends (Last 30 Days)</Text>
-            <View style={styles.chartPlaceholder}>
-              <Text style={{ color: '#bbb' }}>[Line Chart Placeholder]</Text>
-            </View>
-          </View>
-          {/* Activity Log & Action Items */}
-          <View style={styles.row}>
-            <View style={styles.activityCard}>
-              <Text style={styles.activityTitle}>Recent Activity Log</Text>
-              {activityLog.map((log, idx) => (
-                <Text key={idx} style={styles.activityLogText}>
-                  <Text style={styles.activityLogTime}>[{log.time}] </Text>
-                  {log.text}
-                </Text>
-              ))}
-            </View>
-            <View style={styles.actionCard}>
-              <Text style={styles.actionTitle}>Admin Action Items</Text>
-              {actionItems.map((item, idx) => (
-                <Text key={idx} style={[styles.actionItemText, item.important && styles.actionItemImportant]}>
-                  {item.text}
-                </Text>
-              ))}
-            </View>
-          </View>
+              {/* Donation Trends Chart (placeholder) */}
+              <View style={styles.chartCard}>
+                <Text style={styles.chartTitle}>Donation Trends (Last 30 Days)</Text>
+                <View style={styles.chartPlaceholder}>
+                  <Text style={{ color: '#bbb' }}>[Line Chart Placeholder]</Text>
+                </View>
+              </View>
+              {/* Activity Log & Action Items */}
+              <View style={styles.row}>
+                <View style={styles.activityCard}>
+                  <Text style={styles.activityTitle}>Recent Activity Log</Text>
+                  {activityLog.map((log, idx) => (
+                    <Text key={idx} style={styles.activityLogText}>
+                      <Text style={styles.activityLogTime}>[{log.time}] </Text>
+                      {log.text}
+                    </Text>
+                  ))}
+                </View>
+                <View style={styles.actionCard}>
+                  <Text style={styles.actionTitle}>Admin Action Items</Text>
+                  {actionItems.map((item, idx) => (
+                    <Text key={idx} style={[styles.actionItemText, item.important && styles.actionItemImportant]}>
+                      {item.text}
+                    </Text>
+                  ))}
+                </View>
+              </View>
+            </>
+          ) : (
+            <>
+              {/* User Management Content */}
+              <UserManagementSection
+                activeUserTab={activeUserTab}
+                setActiveUserTab={setActiveUserTab}
+                users={users}
+                usersLoading={usersLoading}
+                pendingUserId={pendingUserId}
+                onBlockToggle={async (u) => {
+                  try {
+                    setPendingUserId(u.uid || u.id);
+                    const next = u.status === 'blocked' ? 'active' : 'blocked';
+                    await updateUserStatus(u.uid || u.id, next);
+                    // Real-time snapshot will update the row; keep UI minimal
+                  } catch (e) {
+                    Alert.alert('Error', e.message || 'Failed to update user status');
+                  } finally {
+                    setPendingUserId(null);
+                  }
+                }}
+                onChangeRole={async (u, role) => {
+                  try {
+                    setPendingUserId(u.uid || u.id);
+                    await updateUserRole(u.uid || u.id, role);
+                  } catch (e) {
+                    Alert.alert('Error', e.message || 'Failed to update role');
+                  } finally {
+                    setPendingUserId(null);
+                  }
+                }}
+                onView={(u) => {
+                  const created = u.createdAt?.toDate ? u.createdAt.toDate().toLocaleString() : (u.createdAt || '');
+                  Alert.alert('User Details', `Name: ${u.name || ''}\nEmail: ${u.email || ''}\nRole: ${u.role || ''}\nStatus: ${u.status || ''}\nRegistered: ${created}`);
+                }}
+                onDelete={async (u) => {
+                  Alert.alert(
+                    'Delete User',
+                    `Are you sure you want to delete ${u.name || 'this user'}? This cannot be undone.`,
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Delete',
+                        style: 'destructive',
+                        onPress: async () => {
+                          try {
+                            setPendingUserId(u.uid || u.id);
+                            await deleteUser(u.uid || u.id);
+                          } catch (e) {
+                            Alert.alert('Error', e.message || 'Failed to delete user');
+                          } finally {
+                            setPendingUserId(null);
+                          }
+                        },
+                      },
+                    ]
+                  );
+                }}
+              />
+            </>
+          )}
         </ScrollView>
       </View>
     </View>
   );
 }
+
+function UserManagementSection({ activeUserTab, setActiveUserTab, users, usersLoading, onBlockToggle, onChangeRole, onView, onDelete, pendingUserId }) {
+  const tabs = ['Donors', 'Beneficiaries', 'Volunteers'];
+  const grouped = useMemo(() => {
+    const norm = (r) => (r || '').toString().trim().toLowerCase();
+    return {
+      Donors: users.filter(u => norm(u.role) === 'donor'),
+      Beneficiaries: users.filter(u => norm(u.role) === 'beneficiary'),
+      Volunteers: users.filter(u => norm(u.role) === 'volunteer'),
+    };
+  }, [users]);
+
+  return (
+    <View>
+      <Text style={styles.umTitle}>User Management</Text>
+      <View style={styles.umTabs}>
+        {tabs.map(t => (
+          <TouchableOpacity key={t} style={[styles.umTab, activeUserTab === t && styles.umTabActive]} onPress={() => setActiveUserTab(t)}>
+            <Text style={[styles.umTabText, activeUserTab === t && styles.umTabTextActive]}>{t}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      {usersLoading ? (
+        <Text style={{ color: '#333', marginTop: 12 }}>Loading users...</Text>
+      ) : (
+        <View style={styles.umList}>
+          {grouped[activeUserTab].map((u) => (
+            <View key={u.uid || u.id} style={styles.umRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.umName}>{u.name || '(no name)'}</Text>
+                <Text style={styles.umSub}>{u.email || ''}</Text>
+                <Text style={styles.umSub}>Role: {u.role || '-'} | Status: {u.status || '-'}</Text>
+              </View>
+              <View style={styles.umActions}>
+                <TouchableOpacity style={[styles.umBtn, styles.umBtnSecondary]} onPress={() => onView(u)} disabled={pendingUserId === (u.uid || u.id)}>
+                  <Text style={styles.umBtnText}>{pendingUserId === (u.uid || u.id) ? '...' : 'Details'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.umBtn, u.status === 'blocked' ? styles.umBtnPrimary : styles.umBtnDanger]} onPress={() => onBlockToggle(u)} disabled={pendingUserId === (u.uid || u.id)}>
+                  <Text style={styles.umBtnText}>{pendingUserId === (u.uid || u.id) ? '...' : (u.status === 'blocked' ? 'Unblock' : 'Block')}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.umBtn, styles.umBtnWarning]} onPress={() => onDelete(u)} disabled={pendingUserId === (u.uid || u.id)}>
+                  <Text style={styles.umBtnText}>{pendingUserId === (u.uid || u.id) ? '...' : 'Delete'}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+          {grouped[activeUserTab].length === 0 && (
+            <Text style={{ color: '#666', marginTop: 12 }}>No users found.</Text>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
 
 const styles = StyleSheet.create({
   root: { flex: 1, flexDirection: 'row', backgroundColor: '#f3f8f3' },
@@ -379,4 +517,56 @@ const styles = StyleSheet.create({
     color: '#e53935',
     fontWeight: 'bold',
   },
+  // User Management styles
+  umTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#2e7d32',
+    marginBottom: 12,
+  },
+  umTabs: {
+    flexDirection: 'row',
+    marginBottom: 12,
+  },
+  umTab: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: '#e8f5e9',
+    borderRadius: 8,
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#c8e6c9',
+  },
+  umTabActive: {
+    backgroundColor: '#c8e6c9',
+    borderColor: '#81c784',
+  },
+  umTabText: { color: '#2e7d32', fontWeight: '600' },
+  umTabTextActive: { color: '#1b5e20' },
+  umList: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 12,
+  },
+  umRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  umName: { fontSize: 16, fontWeight: '600', color: '#1b5e20' },
+  umSub: { color: '#555', fontSize: 13 },
+  umActions: { flexDirection: 'row' },
+  umBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  umBtnPrimary: { backgroundColor: '#2e7d32' },
+  umBtnDanger: { backgroundColor: '#e53935' },
+  umBtnSecondary: { backgroundColor: '#78909c' },
+  umBtnWarning: { backgroundColor: '#f57c00' },
+  umBtnText: { color: '#fff', fontWeight: '600' },
 });

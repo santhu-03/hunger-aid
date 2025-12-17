@@ -69,6 +69,7 @@ import { getAuth } from 'firebase/auth';
 import { collection, doc, getDoc, getFirestore, onSnapshot, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { handleDonationAcceptance } from '../services/donationAcceptanceService';
 
 function formatTime(secs) {
   const m = Math.floor(secs / 60);
@@ -247,21 +248,92 @@ if (left === 0 && prevLeft > 0) {
     const donationId = donationDetails?.id;
     if (!currentUser || !currentUser.uid) {
       console.error("User not authenticated!");
+      Alert.alert('Error', 'User not authenticated');
       return;
     }
     if (!donationId) {
       console.error("Donation ID is missing!");
+      Alert.alert('Error', 'Donation ID is missing');
       return;
     }
-    const docRef = doc(db, 'donations', donationId);
+    
     try {
-      await updateDoc(docRef, {
-        status: 'Accepted',
-        beneficiaryId: currentUser.uid
+      // Get beneficiary location first
+      const userRef = doc(db, 'users', currentUser.uid);
+      const userSnap = await getDoc(userRef);
+      const userData = userSnap.data();
+      
+      if (!userData?.location?.latitude || !userData?.location?.longitude) {
+        Alert.alert(
+          'Location Required', 
+          'Please set your location first before accepting donations.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
+      // Get donation details - the donor location is stored in 'location' field
+      const donationRef = doc(db, 'donations', donationId);
+      const donationSnap = await getDoc(donationRef);
+      const donationData = donationSnap.data();
+
+      // Check if donation has location (donor's location)
+      if (!donationData?.location?.latitude || !donationData?.location?.longitude) {
+        Alert.alert('Error', 'Donor location not available. Cannot assign volunteer.');
+        return;
+      }
+
+      // Get donor details for address
+      let donorAddress = 'Pickup Location';
+      if (donationData.donorId) {
+        const donorRef = doc(db, 'users', donationData.donorId);
+        const donorSnap = await getDoc(donorRef);
+        if (donorSnap.exists()) {
+          const donorData = donorSnap.data();
+          donorAddress = donorData.address || 'Pickup Location';
+        }
+      }
+
+      // Update donation status to accepted by beneficiary
+      await updateDoc(donationRef, {
+        status: 'accepted_by_beneficiary',
+        beneficiaryId: currentUser.uid,
+        acceptedAt: new Date().toISOString()
       });
+
+      // Prepare locations for volunteer assignment
+      const pickupLocation = {
+        latitude: donationData.location.latitude,
+        longitude: donationData.location.longitude,
+        address: donorAddress,
+      };
+
+      const dropLocation = {
+        latitude: userData.location.latitude,
+        longitude: userData.location.longitude,
+        address: userData.address || 'Beneficiary Location',
+      };
+
+      const donationDetailsForAssignment = {
+        items: donationData.foodItem || donationData.items,
+        quantity: donationData.quantity,
+        category: donationData.category || donationData.foodType,
+        description: donationData.description,
+        photoUri: donationData.photoUri,
+      };
+
+      // Trigger volunteer assignment
+      await handleDonationAcceptance(
+        donationId,
+        pickupLocation,
+        dropLocation,
+        donationDetailsForAssignment
+      );
+
       if (props.onAccept) props.onAccept(donationId);
     } catch (error) {
-      console.error("Error during update:", error);
+      console.error("Error during donation acceptance:", error);
+      Alert.alert('Error', error.message || 'Failed to accept donation. Please try again.');
     }
   };
 

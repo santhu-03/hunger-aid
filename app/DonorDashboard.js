@@ -1,7 +1,9 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { getAuth } from 'firebase/auth';
+import { doc, getFirestore, onSnapshot } from 'firebase/firestore';
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Appearance, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Appearance, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import DonorProfile from '../profile/DonorProfile';
 import CampaignsScreen from './camp';
 import DonationScreen from './DonationScreen';
@@ -68,6 +70,23 @@ export default function DonorDashboard({ userData, onLogout }) {
   }, [theme]);
 
   const isDark = currentTheme === 'dark';
+
+  // Enforce access restriction if blocked
+  useEffect(() => {
+    const auth = getAuth();
+    const db = getFirestore();
+    const uid = userData?.uid || auth?.currentUser?.uid;
+    if (!uid) return;
+    const unsub = onSnapshot(doc(db, 'users', uid), (snap) => {
+      if (snap.exists()) {
+        const status = snap.data()?.status;
+        if (status === 'blocked') {
+          Alert.alert('Access Restricted', 'Your account has been blocked by the admin.');
+        }
+      }
+    });
+    return () => unsub();
+  }, [userData?.uid]);
 
   // Example data for cards
   const feedCards = [

@@ -1,9 +1,12 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import * as Location from 'expo-location';
+import { getAuth } from 'firebase/auth';
+import { arrayUnion, collection, doc, getFirestore, onSnapshot, query, runTransaction, serverTimestamp, updateDoc, where } from 'firebase/firestore';
+import React, { useEffect, useState } from 'react';
+import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import VolunteerProfile from '../profile/VolunteerProfile';
-import VDeliveryScreen from './VDeliveryScreen';
+import { acceptDelivery, rejectDelivery } from '../services/volunteerAssignmentService';
 
 // Use the same feedCards and feed logic as DonorDashboard
 export default function VolunteerDashboard({ userData, onLogout }) {
@@ -26,6 +29,43 @@ export default function VolunteerDashboard({ userData, onLogout }) {
   const [showPostModal, setShowPostModal] = useState(false);
   const [commentInputs, setCommentInputs] = useState({});
   const [likedPosts, setLikedPosts] = useState({});
+  const [transportToggle, setTransportToggle] = useState(false);
+  const [isUpdatingLocation, setIsUpdatingLocation] = useState(false);
+
+  const auth = getAuth();
+  const db = getFirestore();
+  const volunteerId = userData?.uid || auth?.currentUser?.uid || null;
+  const [taskLoading, setTaskLoading] = useState(true);
+  const [activeTask, setActiveTask] = useState(null);
+  const [taskError, setTaskError] = useState('');
+  const [pendingDonations, setPendingDonations] = useState([]);
+
+  // Location tracking state
+  const [isTrackingLocation, setIsTrackingLocation] = useState(false);
+  const [locationError, setLocationError] = useState('');
+  const [currentLocation, setCurrentLocation] = useState(null);
+  const [isLocating, setIsLocating] = useState(false);
+
+  // Enforce access restriction if blocked and keep toggle in sync from Firestore
+  useEffect(() => {
+    const uid = volunteerId;
+    if (!uid) return;
+    const unsub = onSnapshot(doc(db, 'users', uid), (snap) => {
+      if (snap.exists()) {
+        const status = snap.data()?.status;
+        if (status === 'blocked') {
+          Alert.alert('Access Restricted', 'Your account has been blocked by the admin.');
+        }
+        // Sync toggle from stored value
+        if (typeof snap.data()?.transportAvailability === 'boolean') {
+          setTransportToggle(!!snap.data()?.transportAvailability);
+        } else if (typeof snap.data()?.transportActive === 'boolean') {
+          setTransportToggle(!!snap.data()?.transportActive);
+        }
+      }
+    });
+    return () => unsub();
+  }, [volunteerId]);
 
   // Sample delivery task for demonstration
   const sampleDeliveryTask = {
@@ -41,6 +81,231 @@ export default function VolunteerDashboard({ userData, onLogout }) {
     },
     totalDistance: 7.2,
     estimatedTime: 28
+  };
+
+  // Real-time subscription: donations assigned to this volunteer and pending response
+  useEffect(() => {
+    if (!volunteerId) return;
+    setTaskLoading(true);
+    setTaskError('');
+    const q = query(
+      collection(db, 'donations'),
+      where('assignedVolunteerId', '==', volunteerId),
+      where('deliveryStatus', '==', 'pending_volunteer_response')
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setPendingDonations(list);
+      setTaskLoading(false);
+      if (list.length > 0) {
+        setActiveMenu((prev) => (prev === 'Transport Requests' ? prev : 'Transport Requests'));
+      }
+    }, (err) => {
+      setTaskError(err.message || 'Could not load requests');
+      setTaskLoading(false);
+    });
+    return () => unsub();
+  }, [volunteerId]);
+
+  // Handle transport toggle - fetch and store location when activated
+  const handleTransportToggle = async () => {
+    const newToggleState = !transportToggle;
+    
+    if (newToggleState) {
+      // Activating - fetch and store location
+      setIsUpdatingLocation(true);
+      
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        
+        if (status !== 'granted') {
+          Alert.alert(
+            'Permission Required',
+            'Location permission is required to activate transport services.'
+          );
+          setIsUpdatingLocation(false);
+          return;
+        }
+
+        const location = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+
+        // Store location and set availability to 'available'
+        const userRef = doc(db, 'users', volunteerId);
+        await updateDoc(userRef, {
+          location: {
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+          },
+          availability: 'available',
+          transportAvailability: true,
+          updatedAt: serverTimestamp(),
+          transportActive: true,
+        });
+
+        setTransportToggle(true);
+        Alert.alert('Success', 'You are now active and available for transport requests!');
+      } catch (error) {
+        console.error('Error activating transport:', error);
+        Alert.alert('Error', 'Failed to activate transport. Please try again.');
+      } finally {
+        setIsUpdatingLocation(false);
+      }
+    } else {
+      // Deactivating - set availability to inactive
+      try {
+        const userRef = doc(db, 'users', volunteerId);
+        await updateDoc(userRef, {
+          availability: 'inactive',
+          transportAvailability: false,
+          transportActive: false,
+          updatedAt: serverTimestamp(),
+        });
+
+        setTransportToggle(false);
+        Alert.alert('Success', 'Transport service deactivated.');
+      } catch (error) {
+        console.error('Error deactivating transport:', error);
+        Alert.alert('Error', 'Failed to deactivate. Please try again.');
+      }
+    }
+  };
+
+  // Simple accept/reject handlers for pending donations
+  const handleAcceptDelivery = async (donationId) => {
+    try {
+      await acceptDelivery(donationId, volunteerId);
+      Alert.alert('Accepted', 'You accepted the delivery.');
+    } catch (e) {
+      Alert.alert('Error', e?.message || 'Failed to accept delivery');
+    }
+  };
+
+  const handleRejectDelivery = async (donationId) => {
+    try {
+      await rejectDelivery(donationId, volunteerId, null, null, null);
+      Alert.alert('Rejected', 'You rejected the delivery.');
+    } catch (e) {
+      Alert.alert('Error', e?.message || 'Failed to reject delivery');
+    }
+  };
+
+  // Real-time location tracking when Transport Requests is active
+  useEffect(() => {
+    let locationSubscription = null;
+
+    const startLocationTracking = async () => {
+      if (!volunteerId) {
+        setLocationError('User not authenticated');
+        return;
+      }
+
+      setLocationError('');
+
+      try {
+        // Request location permissions
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setLocationError('Location permission denied');
+          Alert.alert('Permission Required', 'Location permission is required for Transport Requests.');
+          return;
+        }
+
+        setIsTrackingLocation(true);
+
+        // Start watching position with balanced accuracy to avoid battery drain
+        locationSubscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: 10000, // Update every 10 seconds
+            distanceInterval: 50, // Or when moved 50 meters
+          },
+          async (location) => {
+            const { latitude, longitude } = location.coords;
+            setCurrentLocation({ latitude, longitude });
+
+            // Update Firebase with volunteer's current location
+            try {
+              const userRef = doc(db, 'users', volunteerId);
+              await updateDoc(userRef, {
+                location: {
+                  latitude,
+                  longitude,
+                },
+                availability: 'available',
+                updatedAt: serverTimestamp(),
+                lastLocationUpdate: new Date().toISOString(),
+              });
+            } catch (error) {
+              console.error('Error updating location:', error);
+              // Don't show alert for network failures to avoid interrupting user
+              if (!error.message?.includes('network')) {
+                setLocationError('Failed to update location');
+              }
+            }
+          }
+        );
+      } catch (error) {
+        console.error('Error starting location tracking:', error);
+        setLocationError(error.message || 'Failed to start location tracking');
+        setIsTrackingLocation(false);
+      }
+    };
+
+    const stopLocationTracking = () => {
+      if (locationSubscription) {
+        locationSubscription.remove();
+        locationSubscription = null;
+      }
+      setIsTrackingLocation(false);
+      setCurrentLocation(null);
+    };
+
+    // Cleanup on unmount
+    return () => {};
+  }, [activeMenu, volunteerId]);
+
+  const handleTaskAccept = async (taskId) => {
+    try {
+      const taskRef = doc(db, 'deliveryTasks', taskId);
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(taskRef);
+        if (!snap.exists()) throw new Error('Task not found');
+        const task = snap.data();
+        if (task.currentVolunteerId !== volunteerId) throw new Error('Not assigned to you');
+        if (task.status !== 'Offered') throw new Error('Task already handled');
+        if (task.offerExpiry?.toMillis && task.offerExpiry.toMillis() <= Date.now()) throw new Error('Offer expired');
+        tx.update(taskRef, {
+          status: 'Accepted',
+          acceptedAt: serverTimestamp(),
+          volunteerId,
+        });
+      });
+      Alert.alert('Success', 'Task accepted. Proceed to pickup.');
+    } catch (e) {
+      Alert.alert('Could not accept', e.message || 'Please try again');
+    }
+  };
+
+  const handleTaskReject = async (taskId) => {
+    try {
+      const taskRef = doc(db, 'deliveryTasks', taskId);
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(taskRef);
+        if (!snap.exists()) throw new Error('Task not found');
+        const task = snap.data();
+        if (task.currentVolunteerId !== volunteerId) throw new Error('Not assigned to you');
+        tx.update(taskRef, {
+          status: 'Rejected',
+          rejectedVolunteers: arrayUnion(volunteerId),
+          rejectedAt: serverTimestamp(),
+        });
+      });
+      Alert.alert('Task declined', 'We will reassign this delivery.');
+    } catch (e) {
+      Alert.alert('Could not decline', e.message || 'Please try again');
+    }
   };
 
   // Use the same donor feed cards
@@ -175,17 +440,45 @@ export default function VolunteerDashboard({ userData, onLogout }) {
           onClose={() => setActiveMenu('Home')}
         />
       ) : activeMenu === 'Transport Requests' ? (
-        <VDeliveryScreen
-          deliveryTaskDetails={sampleDeliveryTask}
-          onAccept={id => {
-            alert('Accepted delivery task: ' + id);
-            setActiveMenu('Home');
-          }}
-          onReject={id => {
-            alert('Rejected delivery task: ' + id);
-            setActiveMenu('Home');
-          }}
-        />
+        <View style={styles.emptyContent}>
+          <View style={styles.toggleContainer}>
+            <Text style={styles.toggleLabel}>
+              {transportToggle ? 'Active' : 'Inactive'}
+            </Text>
+            <TouchableOpacity 
+              style={[styles.toggleSwitch, transportToggle && styles.toggleSwitchActive]}
+              onPress={handleTransportToggle}
+              activeOpacity={0.8}
+              disabled={isUpdatingLocation}
+            >
+              <View style={[styles.toggleThumb, transportToggle && styles.toggleThumbActive]} />
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.emptyText}>Transport Requests</Text>
+          {pendingDonations.length > 0 ? (
+            <View style={{ width: '100%', paddingHorizontal: 16, marginTop: 8 }}>
+              {pendingDonations.map((d) => (
+                <View key={d.id} style={{ backgroundColor: '#fff', borderRadius: 12, padding: 12, marginBottom: 10 }}>
+                  <Text style={{ fontWeight: 'bold', color: '#1b5e20', marginBottom: 4 }}>Donation: {d.foodItem || d.title || d.id}</Text>
+                  <Text style={{ color: '#555' }}>Status: {d.deliveryStatus}</Text>
+                  <View style={{ flexDirection: 'row', marginTop: 10 }}>
+                    <TouchableOpacity style={[styles.reqBtn, styles.reqBtnPrimary]} onPress={() => handleAcceptDelivery(d.id)}>
+                      <Text style={styles.reqBtnText}>Accept Delivery</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.reqBtn, styles.reqBtnDanger]} onPress={() => handleRejectDelivery(d.id)}>
+                      <Text style={styles.reqBtnText}>Reject</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : (
+            <Text style={styles.updatingText}>No pending requests right now.</Text>
+          )}
+          {isUpdatingLocation && (
+            <Text style={styles.updatingText}>Updating location...</Text>
+          )}
+        </View>
       ) : (
         <>
           <ScrollView contentContainerStyle={styles.feed}>
@@ -752,5 +1045,70 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  emptyContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
+    position: 'relative',
+  },
+  emptyText: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  updatingText: {
+    marginTop: 16,
+    fontSize: 14,
+    color: '#2e7d32',
+    fontStyle: 'italic',
+  },
+  reqBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginRight: 8,
+  },
+  reqBtnPrimary: { backgroundColor: '#2e7d32' },
+  reqBtnDanger: { backgroundColor: '#e53935' },
+  reqBtnText: { color: '#fff', fontWeight: '600' },
+  toggleContainer: {
+    position: 'absolute',
+    top: 20,
+    right: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  toggleLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+  },
+  toggleSwitch: {
+    width: 60,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#ccc',
+    padding: 3,
+    justifyContent: 'center',
+  },
+  toggleSwitchActive: {
+    backgroundColor: '#2e7d32',
+  },
+  toggleThumb: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  toggleThumbActive: {
+    transform: [{ translateX: 30 }],
   },
 });
