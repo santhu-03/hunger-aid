@@ -10,8 +10,11 @@ import DonationScreen from './DonationScreen';
 import DonationHistoryScreen from './donorhistory';
 import DonorReportScreen from './DonorReport';
 import DonorSettingsScreen from './donorsettings';
+import FoodQualityScreen from './FoodQualityScreen';
 import NotificationsScreen from './NotificationsScreen';
 import TrackDonationScreen from './TrackDonor';
+import { usePosts } from '../hooks/usePosts';
+import { useImpactMetrics } from '../hooks/useImpactMetrics';
 
 // Move ThemeContext and useTheme to a separate file for a real app, but keep here for now
 export const ThemeContext = createContext({
@@ -30,16 +33,8 @@ export default function DonorDashboard({ userData, onLogout }) {
   const [profilePic, setProfilePic] = useState(null);
   const [firstName, setFirstName] = useState(userData.name ? userData.name.split(' ')[0] : '');
   const [lastName, setLastName] = useState(userData.name ? userData.name.split(' ')[1] || '' : '');
-  const [feedPosts, setFeedPosts] = useState([
-    // Example initial posts
-    {
-      id: 1,
-      author: `${userData.name}`,
-      content: 'Excited to support Hunger Aid!',
-      likes: 2,
-      comments: [{ author: 'Priya', text: 'Thank you for your support!' }],
-    },
-  ]);
+  const { posts: feedPosts, createPost, addComment } = usePosts();
+  const { totalDelivered, totalMeals, activeDonors, loading: metricsLoading } = useImpactMetrics();
   const [newPost, setNewPost] = useState('');
   const [newPostMedia, setNewPostMedia] = useState(null); // { uri, type }
   const [showPostModal, setShowPostModal] = useState(false);
@@ -88,43 +83,6 @@ export default function DonorDashboard({ userData, onLogout }) {
     return () => unsub();
   }, [userData?.uid]);
 
-  // Example data for cards
-  const feedCards = [
-    {
-      type: 'welcome',
-      content: `Welcome back, ${userData.name ? userData.name.split(' ')[0] : 'Donor'}! See the difference you're making.`,
-    },
-    {
-      type: 'success',
-      image: null, // Replace with require('../assets/success-story.jpg') if you have the image
-      story: 'Because of you, Priya now has access to clean drinking water.',
-    },
-    {
-      type: 'project',
-      campaign: 'New School Construction',
-      progress: 0.75,
-      raised: 7500,
-      goal: 10000,
-      update: "We're 75% of the way to building the new school! Your contribution got us one step closer.",
-    },
-    {
-      type: 'thankyou',
-      amount: '$100',
-      message: 'A special thank you from the team for your recent donation. We couldn\'t do this without you.',
-      image: null, // Replace with require('../assets/thankyou.jpg') if you have the image
-    },
-    {
-      type: 'impact',
-      stat: '5,000',
-      icon: 'utensils',
-      text: 'Your support helped us deliver 5,000 meals this month.',
-    },
-    {
-      type: 'campaign',
-      image: null, // Replace with require('../assets/emergency.jpg') if you have the image
-      title: 'Urgent Need: Help provide emergency kits for flood victims.',
-    },
-  ];
 
   // Handler for menu navigation (replace with your navigation logic)
   const handleMenuSelect = (menu) => {
@@ -157,22 +115,21 @@ export default function DonorDashboard({ userData, onLogout }) {
   };
 
   // Add new post to feed with media
-  const handleCreatePost = () => {
-    if (newPost.trim() || newPostMedia) {
-      setFeedPosts([
-        {
-          id: Date.now(),
-          author: userData.name,
-          content: newPost,
-          media: newPostMedia,
-          likes: 0,
-          comments: [],
-        },
-        ...feedPosts,
-      ]);
-      setNewPost('');
-      setNewPostMedia(null);
-      setShowPostModal(false);
+  const handleCreatePost = async () => {
+    if (newPost.trim()) {
+      try {
+        await createPost({
+          userName: userData.name || 'Anonymous',
+          message: newPost,
+          role: userData.role || 'Donor',
+          userId: userData.uid || null,
+        });
+        setNewPost('');
+        setNewPostMedia(null);
+        setShowPostModal(false);
+      } catch (e) {
+        console.error('Error creating post:', e);
+      }
     }
   };
 
@@ -198,23 +155,16 @@ export default function DonorDashboard({ userData, onLogout }) {
     });
   };
 
-  // Like a post
-  const handleLikePost = (postId) => {
-    setFeedPosts(feedPosts.map(post =>
-      post.id === postId ? { ...post, likes: post.likes + 1 } : post
-    ));
-  };
-
   // Add comment to post
-  const handleAddComment = (postId) => {
+  const handleAddComment = async (postId) => {
     const text = commentInputs[postId];
     if (text && text.trim()) {
-      setFeedPosts(feedPosts.map(post =>
-        post.id === postId
-          ? { ...post, comments: [...post.comments, { author: userData.name, text }] }
-          : post
-      ));
-      setCommentInputs({ ...commentInputs, [postId]: '' });
+      try {
+        await addComment(postId, userData.name, text);
+        setCommentInputs({ ...commentInputs, [postId]: '' });
+      } catch (e) {
+        console.error('Error adding comment:', e);
+      }
     }
   };
 
@@ -251,86 +201,47 @@ export default function DonorDashboard({ userData, onLogout }) {
         ) : activeMenu === 'Track Logistics' ? (
           <TrackDonationScreen />
         ) : activeMenu === 'History Overview' ? (
-          <DonationHistoryScreen />
+          <DonationHistoryScreen userId={userData?.uid} role="donor" />
         ) : activeMenu === 'Impact Reports' ? (
           <DonorReportScreen />
         ) : activeMenu === 'Settings' ? (
           <DonorSettingsScreen />
         ) : activeMenu === 'Events & Campaigns' ? (
           <CampaignsScreen />
+        ) : activeMenu === 'Food Quality Check' ? (
+          <FoodQualityScreen />
         ) : (
           <ScrollView contentContainerStyle={styles.feed}>
             {/* Welcome Card */}
             <View style={styles.cardWelcome}>
-              <Text style={styles.cardWelcomeText}>{feedCards[0].content}</Text>
+              <Text style={styles.cardWelcomeText}>Welcome back, {userData.name ? userData.name.split(' ')[0] : 'Donor'}! See the difference you are making.</Text>
             </View>
-            {/* Success Story Card */}
-            <View style={styles.cardSuccess}>
-              {feedCards[1].image ? (
-                <Image source={feedCards[1].image} style={styles.cardImage} />
-              ) : (
-                <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: '#fff' }}>Image</Text>
-                </View>
-              )}
-              <Text style={styles.cardTitle}>Success Story</Text>
-              <Text style={styles.cardBody}>{feedCards[1].story}</Text>
-              <TouchableOpacity style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>Read Full Story</Text>
-              </TouchableOpacity>
-            </View>
-            {/* Project Update Card */}
-            <View style={styles.cardProject}>
-              <Text style={styles.cardTitle}>{feedCards[2].campaign}</Text>
-              <View style={styles.progressBarBg}>
-                <View style={[styles.progressBarFill, { width: `${feedCards[2].progress * 100}%` }]} />
+            {/* Impact Metrics */}
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 14, gap: 10 }}>
+              <View style={{ flex: 1, backgroundColor: '#e8f5e9', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+                <FontAwesome5 name="utensils" size={22} color="#2e7d32" />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#2e7d32', marginTop: 6 }}>{metricsLoading ? '...' : totalMeals}</Text>
+                <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Meals Delivered</Text>
               </View>
-              <Text style={styles.cardBody}>
-                ${feedCards[2].raised} raised of ${feedCards[2].goal} goal
-              </Text>
-              <Text style={styles.cardBody}>{feedCards[2].update}</Text>
-              <TouchableOpacity style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>View Campaign</Text>
-              </TouchableOpacity>
-            </View>
-            {/* Thank You Card */}
-            <View style={styles.cardThankyou}>
-              {feedCards[3].image ? (
-                <Image source={feedCards[3].image} style={styles.cardImageSmall} />
-              ) : (
-                <View style={[styles.cardImageSmall, { justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: '#fff' }}>Image</Text>
-                </View>
-              )}
-              <Text style={styles.cardTitle}>Thank You!</Text>
-              <Text style={styles.cardBody}>{feedCards[3].message}</Text>
-              <Text style={styles.cardBody}>Recent donation: {feedCards[3].amount}</Text>
-            </View>
-            {/* Impact Stat Card */}
-            <View style={styles.cardStat}>
-              <FontAwesome5 name={feedCards[4].icon} size={32} color="#fff" />
-              <Text style={styles.cardStatNumber}>{feedCards[4].stat}</Text>
-              <Text style={styles.cardStatText}>{feedCards[4].text}</Text>
-            </View>
-            {/* New Campaign Card */}
-            <View style={styles.cardCampaign}>
-              {feedCards[5].image ? (
-                <Image source={feedCards[5].image} style={styles.cardImage} />
-              ) : (
-                <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: '#fff' }}>Image</Text>
-                </View>
-              )}
-              <Text style={styles.cardTitle}>{feedCards[5].title}</Text>
-              <TouchableOpacity style={styles.ctaBtnAccent}>
-                <Text style={styles.ctaBtnTextAccent}>Donate Now</Text>
-              </TouchableOpacity>
+              <View style={{ flex: 1, backgroundColor: '#e3f2fd', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+                <FontAwesome5 name="box-open" size={22} color="#1976d2" />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#1976d2', marginTop: 6 }}>{metricsLoading ? '...' : totalDelivered}</Text>
+                <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Deliveries Done</Text>
+              </View>
+              <View style={{ flex: 1, backgroundColor: '#fff3e0', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+                <FontAwesome5 name="hands-helping" size={22} color="#f57c00" />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#f57c00', marginTop: 6 }}>{metricsLoading ? '...' : activeDonors}</Text>
+                <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Active Donors</Text>
+              </View>
             </View>
             {/* Feed posts */}
             {feedPosts.map(post => (
               <View key={post.id} style={styles.feedPostCard}>
-                <Text style={styles.feedPostAuthor}>{post.author}</Text>
-                <Text style={styles.feedPostContent}>{post.content}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                  <Text style={styles.feedPostAuthor}>{post.userName || 'Anonymous'}</Text>
+                  {post.role ? <Text style={{ backgroundColor: '#e8f5e9', color: '#2e7d32', fontSize: 11, fontWeight: 'bold', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginLeft: 8 }}>{post.role}</Text> : null}
+                </View>
+                <Text style={styles.feedPostContent}>{post.message || ''}</Text>
                 {post.media && (
                   post.media.type === 'video' ? (
                     <View style={styles.feedPostMedia}>
@@ -360,7 +271,7 @@ export default function DonorDashboard({ userData, onLogout }) {
                 </View>
                 {/* Comments */}
                 <View style={styles.feedPostComments}>
-                  {post.comments.map((c, idx) => (
+                  {(post.comments || []).map((c, idx) => (
                     <View key={idx} style={styles.feedPostComment}>
                       <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
                       <Text style={styles.feedPostCommentText}>{c.text}</Text>
@@ -384,10 +295,6 @@ export default function DonorDashboard({ userData, onLogout }) {
             <View style={{ height: 80 }} />
           </ScrollView>
         )}
-        {/* Floating Compose Button */}
-        <TouchableOpacity style={styles.fab} onPress={handleOpenPostModal}>
-          <FontAwesome5 name="pen" size={24} color="#fff" />
-        </TouchableOpacity>
         {/* Post Compose Modal */}
         {showPostModal && (
           <View style={styles.postModalOverlay}>
@@ -458,6 +365,7 @@ export default function DonorDashboard({ userData, onLogout }) {
                 <DrawerItem icon="cog" label="Settings" active={activeMenu === 'Settings'} onPress={() => handleMenuSelect('Settings')} />
                 <DrawerItem icon="chart-bar" label="Impact Reports" active={activeMenu === 'Impact Reports'} onPress={() => handleMenuSelect('Impact Reports')} />
                 <DrawerItem icon="calendar-alt" label="Events & Campaigns" active={activeMenu === 'Events & Campaigns'} onPress={() => handleMenuSelect('Events & Campaigns')} />
+                <DrawerItem icon="camera" label="Food Quality Check" active={activeMenu === 'Food Quality Check'} onPress={() => handleMenuSelect('Food Quality Check')} />
                 <DrawerItem icon="question-circle" label="Help & FAQ" active={activeMenu === 'Help & FAQ'} onPress={() => handleMenuSelect('Help & FAQ')} />
               </View>
               <TouchableOpacity style={styles.drawerLogout} onPress={onLogout}>

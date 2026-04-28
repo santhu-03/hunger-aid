@@ -1,4 +1,5 @@
 import { collection, doc, getDoc, getDocs, getFirestore, query, runTransaction, serverTimestamp, where } from 'firebase/firestore';
+import { appendDonationHistoryEvent, resolveUserProfile } from './donationHistoryService';
 
 /**
  * Complete delivery and update all parties
@@ -13,6 +14,7 @@ export async function completeDelivery(donationId, volunteerId) {
     
     // Get volunteer's transportActive preference
     const volunteerRef = doc(db, 'users', volunteerId);
+    const volunteerProfile = await resolveUserProfile(db, volunteerId, 'Volunteer');
     const volunteerSnap = await getDoc(volunteerRef);
     const volunteerData = volunteerSnap.data();
     const transportActive = volunteerData?.transportActive === true;
@@ -68,6 +70,23 @@ export async function completeDelivery(donationId, volunteerId) {
         lastDeliveryCompletedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
         // Keep transportActive unchanged
+
+      appendDonationHistoryEvent(transaction, db, {
+        donationId,
+        eventType: 'delivered',
+        status: 'delivered',
+        deliveryStatus: 'completed',
+        donationData: {
+          ...donationData,
+          volunteerName: volunteerProfile.name,
+        },
+        actor: {
+          userId: volunteerId,
+          name: volunteerProfile.name,
+          role: 'volunteer',
+        },
+        notes: 'Donation delivered successfully.',
+      });
       });
     });
 
@@ -76,18 +95,35 @@ export async function completeDelivery(donationId, volunteerId) {
     console.error('Error completing delivery:', error);
     throw error;
   }
-}
+      const donationSnap = await transaction.get(donationRef);
+      const donationData = donationSnap.exists() ? donationSnap.data() : {};
 
-/**
- * Update delivery status (visible to all parties)
- * @param {string} donationId - Donation ID
- * @param {string} status - New status
- * @param {Object} additionalData - Additional data to update
- * @returns {Promise<void>}
- */
-export async function updateDeliveryStatus(donationId, status, additionalData = {}) {
-  try {
-    const db = getFirestore();
+      // Update both donation and transport request
+      transaction.update(donationRef, {
+        deliveryStatus: status,
+        updatedAt: serverTimestamp(),
+        ...additionalData,
+      });
+
+      transaction.update(transportRef, {
+        status: status,
+        updatedAt: serverTimestamp(),
+        ...additionalData,
+      });
+
+      appendDonationHistoryEvent(transaction, db, {
+        donationId,
+        eventType: status,
+        status,
+        deliveryStatus: status,
+        donationData,
+        actor: {
+          userId: additionalData.actorId || null,
+          name: additionalData.actorName || '',
+          role: additionalData.actorRole || '',
+        },
+        notes: additionalData.note || '',
+        extra: b = getFirestore();
     console.log('📊 Updating delivery status:', { donationId, status, additionalData });
     
     await runTransaction(db, async (transaction) => {
@@ -124,7 +160,7 @@ export async function getDeliveryStatus(donationId) {
   try {
     const db = getFirestore();
     const donationRef = doc(db, 'donations', donationId);
-    const donationSnap = await donationRef.get();
+    const donationSnap = await getDoc(donationRef);
 
     if (!donationSnap.exists()) {
       throw new Error('Donation not found');

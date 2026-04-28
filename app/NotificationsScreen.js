@@ -1,158 +1,49 @@
-/**
- * @file NotificationsScreen.js
- * @description This screen acts as a notification inbox, displaying a historical list of all important alerts and updates for the user.
- * @author GitHub Copilot Prompt - Bengaluru, September 27, 2025
- *
- * GITHUB COPILOT: PLEASE GENERATE THE FULL REACT NATIVE COMPONENT BASED ON THE REQUIREMENTS BELOW.
- *
- * --- DETAILED REQUIREMENTS ---
- *
- * 1.  **DEPENDENCIES & IMPORTS:**
- * - Import React, useState, and useEffect.
- * - Import View, Text, StyleSheet, FlatList, TouchableOpacity, and ActivityIndicator from 'react-native'.
- * - Import the `FontAwesome5` icon set from `@expo/vector-icons`.
- *
- * 2.  **MOCK DATA STRUCTURE:**
- * - Create a constant `MOCK_NOTIFICATIONS` array of objects.
- * - Each object should have: `id` (string), `type` (string, e.g., 'receipt', 'impact', 'logistics', 'announcement'), `title` (string), `message` (string), `date` (string, e.g., "2025-09-26"), and `read` (boolean).
- * - Include at least 6-8 mock notifications with a mix of types and both read and unread statuses.
- *
- * 3.  **COMPONENT & STATE:**
- * - Export a default functional component named `NotificationsScreen`.
- * - **State Variables (useState):**
- * - `isLoading` (boolean): To show a loader during the initial data fetch. Default: `true`.
- * - `notifications` (array): To hold the list of all notifications. Default: `[]`.
- *
- * 4.  **COMPONENT LOGIC:**
- * - **`useEffect` Hook:**
- * - Use a `useEffect` that runs once on mount to simulate fetching data.
- * - Inside, use a `setTimeout` of 1 second. After the timeout, set the `notifications` state with the `MOCK_NOTIFICATIONS` data and set `isLoading` to `false`.
- * - **`handleMarkAsRead` Function:**
- * - Accepts a `notificationId` as an argument.
- * - It should find the corresponding notification in the `notifications` array and set its `read` property to `true`.
- * - Update the `notifications` state with the modified array.
- * - **`getIconForType` Function:**
- * - A helper function that accepts a notification `type` string.
- * - It should return the name of a FontAwesome5 icon based on the type.
- * - e.g., 'receipt' -> 'receipt', 'impact' -> 'hand-holding-heart', 'logistics' -> 'truck', 'announcement' -> 'bullhorn'.
- * - **`renderNotificationItem` Function:**
- * - This is the `renderItem` function for the FlatList. It receives `{ item }`.
- * - It should return a `<TouchableOpacity>` styled as a card (`styles.notificationCard`).
- * - The card's style should be different if `item.read` is true (e.g., lower opacity or different background color).
- * - Its `onPress` should call `handleMarkAsRead(item.id)`.
- * - Inside the card, there should be a `View` with `flexDirection: 'row'`:
- * - On the left: A styled `<View>` (`styles.iconContainer`) containing the icon from `getIconForType(item.type)`.
- * - On the right: A `<View>` (`styles.textContainer`) with:
- * - The `item.title` in a bold `<Text>`.
- * - The `item.message` in a regular `<Text>`.
- * - The `item.date` in a smaller, grey `<Text>`.
- *
- * 5.  **JSX VISUAL STRUCTURE:**
- * - A root `<View>` with `styles.container`.
- * - A `<Text>` with `styles.title`: "Notifications".
- * - A "Mark All as Read" `<TouchableOpacity>` at the top right.
- * - If `isLoading` is true, show an `<ActivityIndicator>`.
- * - If `isLoading` is false and `notifications` is empty, show a message like "You have no new notifications."
- * - Otherwise, render a `<FlatList>` component:
- * - `data` should be bound to the `notifications` state.
- * - `renderItem` should be the `renderNotificationItem` function.
- * - `keyExtractor` should use `item.id`.
- *
- * 6.  **STYLING (`StyleSheet.create`):**
- * - Create a comprehensive stylesheet.
- * - Include styles for `container`, `title`, `notificationCard`, `cardUnread`, `iconContainer`, `textContainer`, `notificationTitle`, `notificationMessage`, and `notificationDate`.
- * - The `cardUnread` style should give a visual cue (like a subtle left border color) to indicate unread items.
- */
-
 import { FontAwesome5 } from '@expo/vector-icons';
 import * as Notifications from 'expo-notifications';
+import { getAuth } from 'firebase/auth';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-
-const MOCK_NOTIFICATIONS = [
-  {
-    id: '1',
-    type: 'receipt',
-    title: 'Donation Receipt',
-    message: 'Your donation of ₹2,000 has been received. Thank you!',
-    date: '2025-09-26',
-    read: false,
-  },
-  {
-    id: '2',
-    type: 'impact',
-    title: 'Impact Update',
-    message: 'Your support helped 50 children get school kits.',
-    date: '2025-09-25',
-    read: false,
-  },
-  {
-    id: '3',
-    type: 'logistics',
-    title: 'Pickup Scheduled',
-    message: 'A volunteer will pick up your food donation today at 4pm.',
-    date: '2025-09-24',
-    read: true,
-  },
-  {
-    id: '4',
-    type: 'announcement',
-    title: 'New Campaign Launched',
-    message: 'Join our Flood Relief campaign to help more families.',
-    date: '2025-09-22',
-    read: false,
-  },
-  {
-    id: '5',
-    type: 'impact',
-    title: 'Thank You!',
-    message: 'Your donation made a difference in the Nutrition Drive.',
-    date: '2025-09-20',
-    read: true,
-  },
-  {
-    id: '6',
-    type: 'logistics',
-    title: 'Delivery Completed',
-    message: 'Your donation was delivered to the beneficiary.',
-    date: '2025-09-18',
-    read: true,
-  },
-  {
-    id: '7',
-    type: 'announcement',
-    title: 'App Update',
-    message: 'Check out new features in the latest version.',
-    date: '2025-09-15',
-    read: false,
-  },
-  {
-    id: '8',
-    type: 'receipt',
-    title: 'Receipt Available',
-    message: 'Download your receipt for the August donation.',
-    date: '2025-09-10',
-    read: true,
-  },
-];
+import {
+  listenToUserNotifications,
+  markNotificationAsRead,
+  markAllAsRead,
+} from '../services/notificationService';
 
 export default function NotificationsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [notifications, setNotifications] = useState([]);
   const notificationListener = useRef(null);
 
-  useEffect(() => {
-    setIsLoading(true);
-    setTimeout(() => {
-      setNotifications(MOCK_NOTIFICATIONS);
-      setIsLoading(false);
-    }, 1000);
+  // Get current user ID
+  const auth = getAuth();
+  const userId = auth?.currentUser?.uid;
 
-    // Listen for foreground push notifications
+  // Real-time Firestore listener for notifications
+  useEffect(() => {
+    if (!userId) {
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+
+    const unsubscribe = listenToUserNotifications(userId, (firestoreNotifications) => {
+      // Map Firestore data to UI format
+      const mapped = firestoreNotifications.map((n) => ({
+        ...n,
+        date: n.createdAt?.toDate
+          ? n.createdAt.toDate().toISOString().slice(0, 10)
+          : n.createdAt || 'Just now',
+      }));
+      setNotifications(mapped);
+      setIsLoading(false);
+    });
+
+    // Listen for foreground push notifications and merge into list
     notificationListener.current = Notifications.addNotificationReceivedListener((notification) => {
       const notif = notification.request && notification.request.content;
       if (notif) {
-        setNotifications(prev => [
+        setNotifications((prev) => [
           {
             id: Date.now().toString(),
             type: notif.data?.type || 'announcement',
@@ -165,27 +56,53 @@ export default function NotificationsScreen() {
         ]);
       }
     });
+
     return () => {
-      if (notificationListener.current) Notifications.removeNotificationSubscription(notificationListener.current);
+      unsubscribe();
+      if (notificationListener.current) {
+        notificationListener.current.remove();
+      }
     };
-  }, []);
+  }, [userId]);
 
-  const handleMarkAsRead = (notificationId) => {
-    setNotifications(notifications =>
-      notifications.map(n =>
-        n.id === notificationId ? { ...n, read: true } : n
-      )
-    );
+  // Mark single notification as read (persists to Firestore)
+  const handleMarkAsRead = async (notificationId) => {
+    try {
+      await markNotificationAsRead(notificationId);
+    } catch (e) {
+      console.error('Error marking as read:', e);
+    }
   };
 
-  const handleMarkAllAsRead = () => {
-    setNotifications(notifications =>
-      notifications.map(n => ({ ...n, read: true }))
-    );
+  // Mark all as read (persists to Firestore)
+  const handleMarkAllAsRead = async () => {
+    if (!userId) return;
+    try {
+      await markAllAsRead(userId);
+    } catch (e) {
+      console.error('Error marking all as read:', e);
+    }
   };
 
+  // Map notification types to icons
   const getIconForType = (type) => {
     switch (type) {
+      case 'donation_created':
+        return 'hand-holding-heart';
+      case 'donation_accepted':
+        return 'check-circle';
+      case 'volunteer_assigned':
+      case 'transport_request':
+        return 'truck';
+      case 'delivery_accepted':
+        return 'shipping-fast';
+      case 'delivery_rejected':
+        return 'times-circle';
+      case 'delivery_completed':
+      case 'donation_received':
+        return 'gift';
+      case 'location_updated':
+        return 'map-marker-alt';
       case 'receipt':
         return 'receipt';
       case 'impact':
@@ -238,7 +155,8 @@ export default function NotificationsScreen() {
         <ActivityIndicator size="large" color="#2e7d32" style={{ marginTop: 40 }} />
       ) : notifications.length === 0 ? (
         <View style={{ alignItems: 'center', marginTop: 40 }}>
-          <Text style={{ color: '#888', fontSize: 16 }}>You have no new notifications.</Text>
+          <FontAwesome5 name="bell-slash" size={40} color="#ccc" />
+          <Text style={{ color: '#888', fontSize: 16, marginTop: 12 }}>No notifications yet.</Text>
         </View>
       ) : (
         <FlatList
@@ -251,7 +169,6 @@ export default function NotificationsScreen() {
     </View>
   );
 }
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,

@@ -1,6 +1,7 @@
 import { getAuth } from 'firebase/auth';
-import { doc, getDoc, getFirestore, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, getFirestore, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { Alert } from 'react-native';
+import { appendDonationHistoryEvent, resolveUserProfile } from './donationHistoryService';
 import { notifyDonationAccepted, notifyVolunteerAssigned } from './notificationService';
 import { assignNearestVolunteer, findAllAvailableVolunteers, markAsWaitingForVolunteer } from './volunteerAssignmentService';
 
@@ -38,10 +39,35 @@ export async function handleDonationAcceptance(
     const donorId = donationData?.donorId;
     const foodItem = donationData?.foodItem || 'your donation';
 
-    // Mark donation accepted and pending assignment
-    await updateDoc(donationRef, {
-      status: 'accepted_by_beneficiary',
-      deliveryStatus: 'pending_volunteer_assignment',
+    const beneficiaryProfile = await resolveUserProfile(db, beneficiaryId, 'Beneficiary');
+    const donorProfile = donorId ? await resolveUserProfile(db, donorId, 'Donor') : { userId: donorId, name: 'Donor', role: '' };
+
+    // Mark donation accepted and write the history event atomically.
+    await runTransaction(db, async (transaction) => {
+      transaction.update(donationRef, {
+        status: 'accepted_by_beneficiary',
+        deliveryStatus: 'pending_volunteer_assignment',
+        acceptedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      appendDonationHistoryEvent(transaction, db, {
+        donationId,
+        eventType: 'accepted',
+        status: 'accepted_by_beneficiary',
+        deliveryStatus: 'pending_volunteer_assignment',
+        donationData: {
+          ...donationData,
+          donorName: donorProfile.name,
+          beneficiaryName: beneficiaryProfile.name,
+        },
+        actor: {
+          userId: beneficiaryId,
+          name: beneficiaryProfile.name,
+          role: 'beneficiary',
+        },
+        notes: 'Beneficiary accepted the donation.',
+      });
     });
 
     // Find all available volunteers

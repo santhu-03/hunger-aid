@@ -1,5 +1,6 @@
 import { collection, deleteDoc, doc, getDoc, getDocs, getFirestore, query, runTransaction, serverTimestamp, setDoc, updateDoc, where } from 'firebase/firestore';
 import { calculateHaversineDistance } from '../utils/haversineDistance';
+import { appendDonationHistoryEvent, resolveUserProfile } from './donationHistoryService';
 import { notifyDeliveryAccepted, notifyDeliveryRejected } from './notificationService';
 
 /**
@@ -86,19 +87,14 @@ export async function assignNearestVolunteer(
   const db = getFirestore();
   const nearest = availableVolunteers[0];
   const donationRef = doc(db, 'donations', donationId);
+  const donationSnap = await getDoc(donationRef);
+  const donationData = donationSnap.exists() ? donationSnap.data() : {};
+  const volunteerProfile = await resolveUserProfile(db, nearest.volunteerId, 'Volunteer');
 
   // Clean donationDetails to remove undefined values
   const cleanedDonationDetails = Object.fromEntries(
     Object.entries(donationDetails || {}).filter(([_, value]) => value !== undefined)
   );
-
-  // Update donation with assignment and set pending volunteer response
-  await updateDoc(donationRef, {
-    assignedVolunteerId: nearest.volunteerId,
-    deliveryStatus: 'pending_volunteer_response',
-    status: 'waiting_for_volunteer_acceptance',
-    broadcastAt: serverTimestamp(),
-  });
 
   // Create a single transport request for the assigned volunteer
   const transportRef = doc(collection(db, 'transportRequests'));
@@ -115,15 +111,41 @@ export async function assignNearestVolunteer(
     createdAt: serverTimestamp(),
   };
 
-  // Enrich donor/beneficiary from donation
-  const donationSnap = await getDoc(donationRef);
   if (donationSnap.exists()) {
-    const donationData = donationSnap.data();
     requestData.donorId = donationData.donorId || null;
     requestData.beneficiaryId = donationData.beneficiaryId || donationData.offeredTo || null;
   }
 
-  await setDoc(transportRef, requestData);
+  await runTransaction(db, async (transaction) => {
+    transaction.update(donationRef, {
+      assignedVolunteerId: nearest.volunteerId,
+      deliveryStatus: 'pending_volunteer_response',
+      status: 'waiting_for_volunteer_acceptance',
+      broadcastAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    transaction.set(transportRef, requestData);
+
+    appendDonationHistoryEvent(transaction, db, {
+      donationId,
+      eventType: 'volunteer_assigned',
+      status: 'waiting_for_volunteer_acceptance',
+      deliveryStatus: 'pending_volunteer_response',
+      donationData: {
+        ...donationData,
+        ...cleanedDonationDetails,
+        volunteerName: volunteerProfile.name,
+      },
+      actor: {
+        userId: nearest.volunteerId,
+        name: volunteerProfile.name,
+        role: 'volunteer',
+      },
+      notes: 'Volunteer assigned to the donation.',
+    });
+  });
+
   console.log(`🚚 Assigned volunteer ${nearest.volunteerId} and created transport request for donation ${donationId}`);
 
   return nearest;
@@ -229,6 +251,7 @@ export async function acceptDelivery(donationId, volunteerId) {
     const db = getFirestore();
     const donationRef = doc(db, 'donations', donationId);
     const volunteerRef = doc(db, 'users', volunteerId);
+    const volunteerProfile = await resolveUserProfile(db, volunteerId, 'Volunteer');
     console.log('✅ Volunteer accepting delivery:', { donationId, volunteerId });
     
     await runTransaction(db, async (transaction) => {
@@ -273,6 +296,23 @@ export async function acceptDelivery(donationId, volunteerId) {
         assignedDonationId: donationId,
         transportAvailability: false,
         updatedAt: serverTimestamp(),
+      });
+
+      appendDonationHistoryEvent(transaction, db, {
+        donationId,
+        eventType: 'in_delivery',
+        status: 'in_delivery',
+        deliveryStatus: 'accepted_by_volunteer',
+        donationData: {
+          ...donationData,
+          volunteerName: volunteerProfile.name,
+        },
+        actor: {
+          userId: volunteerId,
+          name: volunteerProfile.name,
+          role: 'volunteer',
+        },
+        notes: 'Volunteer accepted the delivery and the donation is now in delivery.',
       });
     });
 
@@ -346,6 +386,7 @@ export async function rejectDelivery(
     const db = getFirestore();
     const donationRef = doc(db, 'donations', donationId);
     const volunteerRef = doc(db, 'users', volunteerId);
+    const volunteerProfile = await resolveUserProfile(db, volunteerId, 'Volunteer');
     console.log('❌ Volunteer rejecting delivery:', { donationId, volunteerId });
     
     // Get volunteer's transportActive preference
@@ -365,6 +406,9 @@ export async function rejectDelivery(
     const transportRequestRef = transportRequests.empty ? null : transportRequests.docs[0].ref;
     
     await runTransaction(db, async (transaction) => {
+      const donationSnap = await transaction.get(donationRef);
+      const donationData = donationSnap.exists() ? donationSnap.data() : {};
+
       // Update donation (remove assignment, visible to all parties)
       transaction.update(donationRef, {
         deliveryStatus: 'rejected_by_volunteer',
@@ -386,6 +430,23 @@ export async function rejectDelivery(
         assignedDonationId: null,
         currentDeliveryStatus: null,
         updatedAt: serverTimestamp(),
+      });
+
+      appendDonationHistoryEvent(transaction, db, {
+        donationId,
+        eventType: 'failed',
+        status: 'rejected_by_volunteer',
+        deliveryStatus: 'rejected_by_volunteer',
+        donationData: {
+          ...donationData,
+          volunteerName: volunteerProfile.name,
+        },
+        actor: {
+          userId: volunteerId,
+          name: volunteerProfile.name,
+          role: 'volunteer',
+        },
+        notes: 'Volunteer rejected the delivery.',
       });
     });
 

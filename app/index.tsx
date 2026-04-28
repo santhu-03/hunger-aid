@@ -1,28 +1,13 @@
-import { initializeApp } from 'firebase/app';
-import { createUserWithEmailAndPassword, getAuth, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signOut } from 'firebase/auth';
-import { doc, getDoc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
+import { createUserWithEmailAndPassword, onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { auth, db } from '../firebaseConfig';
 import AdminDashboard from './AdminDashboard';
 import BeneficiaryDashboard from './BeneficiaryDashboard';
-import DonationScreen from './DonationScreen'; // Importing DonationScreen
+import DonationScreen from './DonationScreen';
 import DonorDashboard from './DonorDashboard';
 import VolunteerDashboard from './VolunteerDashboard';
-
-// Placeholder Firebase config (replace with your actual config)
-const firebaseConfig = {
-  apiKey: "AIzaSyAwnZZzchJ7nzAsaotZJHHvUJQlvjR03KA",
-  authDomain: "hungeraid-60fb6.firebaseapp.com",
-  projectId: "hungeraid-60fb6",
-  storageBucket: "hungeraid-60fb6.appspot.com",
-  messagingSenderId: "735323954307",
-  appId: "1:735323954307:web:212f7949e9e3b43f56cfb6",
-  measurementId: "G-PDC7CD8VKH"
-};
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
 
 const roles = ['Donor', 'Beneficiary', 'Volunteer', 'Admin'];
 

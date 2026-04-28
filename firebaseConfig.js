@@ -1,20 +1,21 @@
 // Import the functions you need from the SDKs you need
 import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+// Firebase configuration via environment variables (Expo EXPO_PUBLIC_ prefix)
 const firebaseConfig = {
-  apiKey: "AIzaSyAwnZZzchJ7nzAsaotZJHHvUJQlvjR03KA",
-  authDomain: "hungeraid-60fb6.firebaseapp.com",
-  projectId: "hungeraid-60fb6",
-  storageBucket: "hungeraid-60fb6.appspot.com",
-  messagingSenderId: "735323954307",
-  appId: "1:735323954307:web:212f7949e9e3b43f56cfb6",
-  measurementId: "G-PDC7CD8VKH"
+  apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
 };
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
 
-export { app, firebaseConfig };
-
+export { app, auth, db, firebaseConfig };

@@ -1,4 +1,5 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { useNavigation } from '@react-navigation/native';
 import { getAuth } from 'firebase/auth';
 import { collection, doc, getFirestore, onSnapshot, query, where } from 'firebase/firestore';
@@ -7,6 +8,9 @@ import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput
 import { app } from '../firebaseConfig'; // adjust path as needed
 import BeneficiaryProfile from '../profile/BeneficiaryProfile';
 import BDonationScreen from './BDonationScreen';
+import FoodQualityScreen from './FoodQualityScreen';
+import { usePosts } from '../hooks/usePosts';
+import { useImpactMetrics } from '../hooks/useImpactMetrics';
 
 const beneficiaryMenuOptions = [
   { icon: "home", label: "Home" },
@@ -17,6 +21,7 @@ const beneficiaryMenuOptions = [
   { icon: "envelope", label: "Inbox / Messages" },
   { icon: "question-circle", label: "Help & Support" },
   { icon: "cog", label: "Settings" },
+  { icon: "camera", label: "Food Quality Check" },
 ];
 
 export default function BeneficiaryDashboard({ userData, onLogout }) {
@@ -43,56 +48,12 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     return () => unsub();
   }, [userData?.uid]);
 
-  // Use donor-style feed cards
-  const feedCards = [
-    {
-      type: 'welcome',
-      content: `Welcome back, ${userData.name ? userData.name.split(' ')[0] : 'Beneficiary'}! See the difference you're making.`,
-    },
-    {
-      type: 'success',
-      image: null,
-      story: 'Because of you, Priya now has access to clean drinking water.',
-    },
-    {
-      type: 'project',
-      campaign: 'New School Construction',
-      progress: 0.75,
-      raised: 7500,
-      goal: 10000,
-      update: "We're 75% of the way to building the new school! Your contribution got us one step closer.",
-    },
-    {
-      type: 'thankyou',
-      amount: '$100',
-      message: 'A special thank you from the team for your recent donation. We couldn\'t do this without you.',
-      image: null,
-    },
-    {
-      type: 'impact',
-      stat: '5,000',
-      icon: 'utensils',
-      text: 'Your support helped us deliver 5,000 meals this month.',
-    },
-    {
-      type: 'campaign',
-      image: null,
-      title: 'Urgent Need: Help provide emergency kits for flood victims.',
-    },
-  ];
 
   const [showPostModal, setShowPostModal] = useState(false);
   const [newPost, setNewPost] = useState('');
   const [newPostMedia, setNewPostMedia] = useState(null);
-  const [feedPosts, setFeedPosts] = useState([
-    {
-      id: 1,
-      author: `${userData.name}`,
-      content: 'Excited to support Hunger Aid!',
-      likes: 2,
-      comments: [{ author: 'Priya', text: 'Thank you for your support!' }],
-    },
-  ]);
+  const { posts: feedPosts, createPost, addComment } = usePosts();
+  const { totalDelivered, totalMeals, activeDonors, loading: metricsLoading } = useImpactMetrics();
   const [commentInputs, setCommentInputs] = useState({});
   const [likedPosts, setLikedPosts] = useState({});
   const [offerModal, setOfferModal] = useState(null);
@@ -133,22 +94,21 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     setNewPostMedia(null);
   };
 
-  const handleCreatePost = () => {
-    if (newPost.trim() || newPostMedia) {
-      setFeedPosts([
-        {
-          id: Date.now(),
-          author: userData.name,
-          content: newPost,
-          media: newPostMedia,
-          likes: 0,
-          comments: [],
-        },
-        ...feedPosts,
-      ]);
-      setNewPost('');
-      setNewPostMedia(null);
-      setShowPostModal(false);
+  const handleCreatePost = async () => {
+    if (newPost.trim()) {
+      try {
+        await createPost({
+          userName: userData.name || 'Anonymous',
+          message: newPost,
+          role: userData.role || 'Beneficiary',
+          userId: userData.uid || null,
+        });
+        setNewPost('');
+        setNewPostMedia(null);
+        setShowPostModal(false);
+      } catch (e) {
+        console.error('Error creating post:', e);
+      }
     }
   };
 
@@ -174,15 +134,15 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     });
   };
 
-  const handleAddComment = (postId) => {
+  const handleAddComment = async (postId) => {
     const text = commentInputs[postId];
     if (text && text.trim()) {
-      setFeedPosts(feedPosts.map(post =>
-        post.id === postId
-          ? { ...post, comments: [...post.comments, { author: userData.name, text }] }
-          : post
-      ));
-      setCommentInputs({ ...commentInputs, [postId]: '' });
+      try {
+        await addComment(postId, userData.name, text);
+        setCommentInputs({ ...commentInputs, [postId]: '' });
+      } catch (e) {
+        console.error('Error adding comment:', e);
+      }
     }
   };
 
@@ -245,79 +205,40 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
             setActiveMenu('Home');
           }}
         />
+      ) : activeMenu === 'Food Quality Check' ? (
+        <FoodQualityScreen />
       ) : (
         <ScrollView contentContainerStyle={styles.feed}>
           {/* Welcome Card */}
           <View style={styles.cardWelcome}>
-            <Text style={styles.cardWelcomeText}>{feedCards[0].content}</Text>
+            <Text style={styles.cardWelcomeText}>Welcome back, {userData.name ? userData.name.split(' ')[0] : 'Beneficiary'}! Check available donations near you.</Text>
           </View>
-          {/* Success Story Card */}
-          <View style={styles.cardSuccess}>
-            {feedCards[1].image ? (
-              <Image source={feedCards[1].image} style={styles.cardImage} />
-            ) : (
-              <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                <Text style={{ color: '#fff' }}>Image</Text>
-              </View>
-            )}
-            <Text style={styles.cardTitle}>Success Story</Text>
-            <Text style={styles.cardBody}>{feedCards[1].story}</Text>
-            <TouchableOpacity style={styles.ctaBtn}>
-              <Text style={styles.ctaBtnText}>Read Full Story</Text>
-            </TouchableOpacity>
-          </View>
-          {/* Project Update Card */}
-          <View style={styles.cardProject}>
-            <Text style={styles.cardTitle}>{feedCards[2].campaign}</Text>
-            <View style={styles.progressBarBg}>
-              <View style={[styles.progressBarFill, { width: `${feedCards[2].progress * 100}%` }]} />
+          {/* Impact Metrics */}
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 14, gap: 10 }}>
+            <View style={{ flex: 1, backgroundColor: '#e8f5e9', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+              <FontAwesome5 name="utensils" size={22} color="#2e7d32" />
+              <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#2e7d32', marginTop: 6 }}>{metricsLoading ? '...' : totalMeals}</Text>
+              <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Meals Delivered</Text>
             </View>
-            <Text style={styles.cardBody}>
-              ${feedCards[2].raised} raised of ${feedCards[2].goal} goal
-            </Text>
-            <Text style={styles.cardBody}>{feedCards[2].update}</Text>
-            <TouchableOpacity style={styles.ctaBtn}>
-              <Text style={styles.ctaBtnText}>View Campaign</Text>
-            </TouchableOpacity>
-          </View>
-          {/* Thank You Card */}
-          <View style={styles.cardThankyou}>
-            {feedCards[3].image ? (
-              <Image source={feedCards[3].image} style={styles.cardImageSmall} />
-            ) : (
-              <View style={[styles.cardImageSmall, { justifyContent: 'center', alignItems: 'center' }]}>
-                <Text style={{ color: '#fff' }}>Image</Text>
-              </View>
-            )}
-            <Text style={styles.cardTitle}>Thank You!</Text>
-            <Text style={styles.cardBody}>{feedCards[3].message}</Text>
-            <Text style={styles.cardBody}>Recent donation: {feedCards[3].amount}</Text>
-          </View>
-          {/* Impact Stat Card */}
-          <View style={styles.cardStat}>
-            <FontAwesome5 name={feedCards[4].icon} size={32} color="#fff" />
-            <Text style={styles.cardStatNumber}>{feedCards[4].stat}</Text>
-            <Text style={styles.cardStatText}>{feedCards[4].text}</Text>
-          </View>
-          {/* New Campaign Card */}
-          <View style={styles.cardCampaign}>
-            {feedCards[5].image ? (
-              <Image source={feedCards[5].image} style={styles.cardImage} />
-            ) : (
-              <View style={[styles.cardImage, { justifyContent: 'center', alignItems: 'center' }]}>
-                <Text style={{ color: '#fff' }}>Image</Text>
-              </View>
-            )}
-            <Text style={styles.cardTitle}>{feedCards[5].title}</Text>
-            <TouchableOpacity style={styles.ctaBtnAccent}>
-              <Text style={styles.ctaBtnTextAccent}>Donate Now</Text>
-            </TouchableOpacity>
+            <View style={{ flex: 1, backgroundColor: '#e3f2fd', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+              <FontAwesome5 name="box-open" size={22} color="#1976d2" />
+              <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#1976d2', marginTop: 6 }}>{metricsLoading ? '...' : totalDelivered}</Text>
+              <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Deliveries Done</Text>
+            </View>
+            <View style={{ flex: 1, backgroundColor: '#fff3e0', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+              <FontAwesome5 name="hands-helping" size={22} color="#f57c00" />
+              <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#f57c00', marginTop: 6 }}>{metricsLoading ? '...' : activeDonors}</Text>
+              <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Active Donors</Text>
+            </View>
           </View>
           {/* Feed posts */}
           {feedPosts.map(post => (
             <View key={post.id} style={styles.feedPostCard}>
-              <Text style={styles.feedPostAuthor}>{post.author}</Text>
-              <Text style={styles.feedPostContent}>{post.content}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                <Text style={styles.feedPostAuthor}>{post.userName || 'Anonymous'}</Text>
+                {post.role ? <Text style={{ backgroundColor: '#e8f5e9', color: '#2e7d32', fontSize: 11, fontWeight: 'bold', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginLeft: 8 }}>{post.role}</Text> : null}
+              </View>
+              <Text style={styles.feedPostContent}>{post.message || ''}</Text>
               {post.media && (
                 post.media.type === 'video' ? (
                   <View style={styles.feedPostMedia}>
@@ -347,7 +268,7 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
               </View>
               {/* Comments */}
               <View style={styles.feedPostComments}>
-                {post.comments.map((c, idx) => (
+                {(post.comments || []).map((c, idx) => (
                   <View key={idx} style={styles.feedPostComment}>
                     <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
                     <Text style={styles.feedPostCommentText}>{c.text}</Text>
@@ -370,10 +291,6 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
           <View style={{ height: 80 }} />
         </ScrollView>
       )}
-      {/* Floating Compose Button */}
-      <TouchableOpacity style={styles.fab} onPress={handleOpenPostModal}>
-        <FontAwesome5 name="pen" size={24} color="#fff" />
-      </TouchableOpacity>
       {/* Post Compose Modal */}
       {showPostModal && (
         <View style={styles.postModalOverlay}>
@@ -982,123 +899,5 @@ const styles = StyleSheet.create({
     color: '#333',
     fontWeight: 'bold',
     fontSize: 15,
-  },
-  drawerOverlay: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  drawerBg: { flex: 1 },
-  drawerLeft: {
-    width: 280,
-    backgroundColor: '#fff',
-    paddingTop: 32,
-    paddingHorizontal: 20,
-    borderTopLeftRadius: 24,
-    borderBottomLeftRadius: 24,
-    elevation: 8,
-    position: 'absolute',
-    left: 0, top: 0, bottom: 0,
-  },
-  drawerHeader: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  profilePic: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    marginBottom: 12,
-    backgroundColor: '#c8e6c9',
-  },
-  drawerName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 8,
-  },
-  drawerMenu: {
-    marginBottom: 24,
-    alignItems: 'flex-start',
-  },
-  drawerItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    marginBottom: 2,
-    minWidth: 220,
-  },
-  drawerItemActive: {
-    backgroundColor: '#388e3c',
-    minWidth: 220,
-  },
-  drawerItemText: {
-    fontSize: 16,
-    color: '#2e7d32',
-    fontWeight: 'bold',
-  },
-  drawerItemTextActive: {
-    color: '#fff',
-  },
-  drawerLogout: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#c8e6c9',
-    marginTop: 12,
-  },
-  drawerLogoutText: {
-    fontSize: 16,
-    color: '#2e7d32',
-    fontWeight: 'bold',
-    marginLeft: 12,
-  },
-  cardImage: {
-    width: '100%',
-    height: 120,
-    borderRadius: 12,
-    marginBottom: 12,
-    resizeMode: 'cover',
-  },
-  cardImageSmall: {
-    width: '100%',
-    height: 80,
-    borderRadius: 12,
-    marginBottom: 12,
-    resizeMode: 'cover',
-  },
-  progressBarBg: {
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#e0e0e0',
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  progressBarFill: {
-    height: '100%',
-    borderRadius: 4,
-    backgroundColor: '#2e7d32',
-  },
-  cardStat: {
-    backgroundColor: '#388e3c',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    elevation: 2,
-  },
-  cardStatNumber: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginRight: 8,
-  },
-  cardStatText: {
-    fontSize: 15,
-    color: '#fff',
   },
 });

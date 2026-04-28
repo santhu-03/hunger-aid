@@ -67,16 +67,34 @@ export default function VolunteerProfile({ userData, onSave, onClose }) {
         profilePic,
       });
     }
-    // Update Firestore users collection with uid, role, and location
+    // Update Firestore users collection with uid, role, location, and address
     try {
       const db = getFirestore();
       const userRef = doc(db, 'users', userData.uid);
+      // Construct full address string from address components
+      const addressParts = [];
+      if (address1) addressParts.push(address1);
+      if (city) addressParts.push(city);
+      if (state) addressParts.push(state);
+      if (zip) addressParts.push(zip);
+      if (country) addressParts.push(country);
+      const fullAddress = addressParts.join(', ');
+      
       await updateDoc(userRef, {
         uid: userData.uid,
         role: 'Volunteer',
+        name: `${firstName} ${lastName}`,
+        phone: phone || null,
+        address1: address1 || null,
+        city: city || null,
+        state: state || null,
+        zip: zip || null,
+        country: country || null,
+        address: fullAddress || 'No address provided',
         location: latitude && longitude ? { latitude, longitude } : null,
       });
     } catch (e) {
+      console.error('Error updating Firestore:', e);
       // ignore Firestore error, allow profile update
     }
     setMode('view');

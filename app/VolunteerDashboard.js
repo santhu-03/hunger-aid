@@ -2,29 +2,25 @@ import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { getAuth } from 'firebase/auth';
-import { arrayUnion, collection, doc, getFirestore, onSnapshot, query, runTransaction, serverTimestamp, updateDoc, where } from 'firebase/firestore';
+import { arrayUnion, collection, doc, getDoc, getDocs, getFirestore, onSnapshot, query, runTransaction, serverTimestamp, updateDoc, where } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import VolunteerProfile from '../profile/VolunteerProfile';
 import { acceptDelivery, rejectDelivery } from '../services/volunteerAssignmentService';
+import FoodQualityScreen from './FoodQualityScreen';
+import { usePosts } from '../hooks/usePosts';
+import { useImpactMetrics } from '../hooks/useImpactMetrics';
 
-// Use the same feedCards and feed logic as DonorDashboard
+
 export default function VolunteerDashboard({ userData, onLogout }) {
   const [menuVisible, setMenuVisible] = useState(false);
   const [activeMenu, setActiveMenu] = useState('Home');
   const [profilePic, setProfilePic] = useState(null);
   const [firstName, setFirstName] = useState(userData.name ? userData.name.split(' ')[0] : '');
   const [lastName, setLastName] = useState(userData.name ? userData.name.split(' ')[1] || '' : '');
-  const [feedPosts, setFeedPosts] = useState([
-    {
-      id: 1,
-      author: `${userData.name}`,
-      content: 'Excited to support Hunger Aid!',
-      likes: 2,
-      comments: [{ author: 'Priya', text: 'Thank you for your support!' }],
-    },
-  ]);
+  const { posts: feedPosts, createPost, addComment } = usePosts();
+  const { totalDelivered, totalMeals, activeDonors, loading: metricsLoading } = useImpactMetrics();
   const [newPost, setNewPost] = useState('');
   const [newPostMedia, setNewPostMedia] = useState(null);
   const [showPostModal, setShowPostModal] = useState(false);
@@ -40,6 +36,7 @@ export default function VolunteerDashboard({ userData, onLogout }) {
   const [activeTask, setActiveTask] = useState(null);
   const [taskError, setTaskError] = useState('');
   const [pendingDonations, setPendingDonations] = useState([]);
+  const [activeDelivery, setActiveDelivery] = useState(null); // Currently in-progress delivery
   const [donationLocations, setDonationLocations] = useState({}); // { donationId: { donor: {}, beneficiary: {} } }
 
   // Location tracking state
@@ -105,6 +102,25 @@ export default function VolunteerDashboard({ userData, onLogout }) {
     }, (err) => {
       setTaskError(err.message || 'Could not load requests');
       setTaskLoading(false);
+    });
+    return () => unsub();
+  }, [volunteerId]);
+
+  // Real-time subscription: active delivery (accepted by volunteer, in transit)
+  useEffect(() => {
+    if (!volunteerId) return;
+    const q = query(
+      collection(db, 'donations'),
+      where('assignedVolunteerId', '==', volunteerId),
+      where('status', '==', 'in_delivery')
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      if (!snap.empty) {
+        const d = snap.docs[0];
+        setActiveDelivery({ id: d.id, ...d.data() });
+      } else {
+        setActiveDelivery(null);
+      }
     });
     return () => unsub();
   }, [volunteerId]);
@@ -251,6 +267,65 @@ export default function VolunteerDashboard({ userData, onLogout }) {
     }
   };
 
+  // Complete a delivery: update donation + volunteer + transport request + notify
+  const handleCompleteDelivery = async (donationId) => {
+    try {
+      const donationRef = doc(db, 'donations', donationId);
+      const volunteerRef = doc(db, 'users', volunteerId);
+
+      // Update donation status to completed
+      await updateDoc(donationRef, {
+        status: 'completed',
+        deliveryStatus: 'delivered',
+        completedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      // Reset volunteer availability
+      const volunteerSnap = await getDoc(volunteerRef);
+      const transportActive = volunteerSnap.data()?.transportActive === true;
+      await updateDoc(volunteerRef, {
+        availability: transportActive ? 'available' : 'inactive',
+        transportAvailability: !!transportActive,
+        currentDeliveryStatus: null,
+        assignedDonationId: null,
+        updatedAt: serverTimestamp(),
+      });
+
+      // Mark transport request as completed
+      const transportSnap = await getDocs(
+        query(
+          collection(db, 'transportRequests'),
+          where('donationId', '==', donationId),
+          where('volunteerId', '==', volunteerId)
+        )
+      );
+      if (!transportSnap.empty) {
+        await updateDoc(transportSnap.docs[0].ref, {
+          status: 'completed',
+          completedAt: serverTimestamp(),
+        });
+      }
+
+      // Send completion notifications
+      const donationSnap = await getDoc(donationRef);
+      if (donationSnap.exists()) {
+        const data = donationSnap.data();
+        const { notifyDeliveryCompleted } = require('../services/notificationService');
+        await notifyDeliveryCompleted(
+          data.donorId,
+          data.beneficiaryId || data.offeredTo,
+          data.foodItem || 'donation'
+        );
+      }
+
+      Alert.alert('✅ Delivery Completed', 'Thank you! The donation has been marked as delivered.');
+    } catch (error) {
+      console.error('Error completing delivery:', error);
+      Alert.alert('Error', error.message || 'Failed to complete delivery. Please try again.');
+    }
+  };
+
   // Real-time location tracking when Transport Requests is active
   useEffect(() => {
     let locationSubscription = null;
@@ -322,8 +397,13 @@ export default function VolunteerDashboard({ userData, onLogout }) {
       setCurrentLocation(null);
     };
 
-    // Cleanup on unmount
-    return () => {};
+    // Start tracking when on Transport Requests view
+    if (activeMenu === 'Transport Requests' && volunteerId) {
+      startLocationTracking();
+    }
+
+    // Cleanup: stop tracking on unmount or when leaving Transport Requests
+    return () => stopLocationTracking();
   }, [activeMenu, volunteerId]);
 
   const handleTaskAccept = async (taskId) => {
@@ -368,44 +448,6 @@ export default function VolunteerDashboard({ userData, onLogout }) {
     }
   };
 
-  // Use the same donor feed cards
-  const feedCards = [
-    {
-      type: 'welcome',
-      content: `Welcome back, ${userData.name ? userData.name.split(' ')[0] : 'Volunteer'}! See the difference you're making.`,
-    },
-    {
-      type: 'success',
-      image: null,
-      story: 'Because of you, Priya now has access to clean drinking water.',
-    },
-    {
-      type: 'project',
-      campaign: 'New School Construction',
-      progress: 0.75,
-      raised: 7500,
-      goal: 10000,
-      update: "We're 75% of the way to building the new school! Your contribution got us one step closer.",
-    },
-    {
-      type: 'thankyou',
-      amount: '$100',
-      message: 'A special thank you from the team for your recent donation. We couldn\'t do this without you.',
-      image: null,
-    },
-    {
-      type: 'impact',
-      stat: '5,000',
-      icon: 'utensils',
-      text: 'Your support helped us deliver 5,000 meals this month.',
-    },
-    {
-      type: 'campaign',
-      image: null,
-      title: 'Urgent Need: Help provide emergency kits for flood victims.',
-    },
-  ];
-
   const handleMenuSelect = (menu) => {
     setActiveMenu(menu);
   };
@@ -427,22 +469,21 @@ export default function VolunteerDashboard({ userData, onLogout }) {
     setNewPostMedia(null);
   };
 
-  const handleCreatePost = () => {
-    if (newPost.trim() || newPostMedia) {
-      setFeedPosts([
-        {
-          id: Date.now(),
-          author: userData.name,
-          content: newPost,
-          media: newPostMedia,
-          likes: 0,
-          comments: [],
-        },
-        ...feedPosts,
-      ]);
-      setNewPost('');
-      setNewPostMedia(null);
-      setShowPostModal(false);
+  const handleCreatePost = async () => {
+    if (newPost.trim()) {
+      try {
+        await createPost({
+          userName: userData.name || 'Anonymous',
+          message: newPost,
+          role: userData.role || 'Volunteer',
+          userId: userData.uid || null,
+        });
+        setNewPost('');
+        setNewPostMedia(null);
+        setShowPostModal(false);
+      } catch (e) {
+        console.error('Error creating post:', e);
+      }
     }
   };
 
@@ -466,15 +507,15 @@ export default function VolunteerDashboard({ userData, onLogout }) {
     });
   };
 
-  const handleAddComment = (postId) => {
+  const handleAddComment = async (postId) => {
     const text = commentInputs[postId];
     if (text && text.trim()) {
-      setFeedPosts(feedPosts.map(post =>
-        post.id === postId
-          ? { ...post, comments: [...post.comments, { author: userData.name, text }] }
-          : post
-      ));
-      setCommentInputs({ ...commentInputs, [postId]: '' });
+      try {
+        await addComment(postId, userData.name, text);
+        setCommentInputs({ ...commentInputs, [postId]: '' });
+      } catch (e) {
+        console.error('Error adding comment:', e);
+      }
     }
   };
 
@@ -515,6 +556,49 @@ export default function VolunteerDashboard({ userData, onLogout }) {
             </TouchableOpacity>
           </View>
           <View style={styles.requestsContentContainer}>
+            {/* Active Delivery - Mark as Delivered */}
+            {activeDelivery && (
+              <View style={{
+                backgroundColor: '#e8f5e9', borderRadius: 16, padding: 18, margin: 16,
+                borderLeftWidth: 6, borderLeftColor: '#2e7d32', elevation: 3,
+              }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                  <FontAwesome5 name="truck" size={22} color="#2e7d32" />
+                  <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#2e7d32', marginLeft: 10 }}>Active Delivery</Text>
+                </View>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <Text style={{ color: '#555', fontWeight: '600' }}>Food Item:</Text>
+                  <Text style={{ color: '#333', fontWeight: '500' }}>{activeDelivery.foodItem || 'N/A'}</Text>
+                </View>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <Text style={{ color: '#555', fontWeight: '600' }}>Quantity:</Text>
+                  <Text style={{ color: '#333', fontWeight: '500' }}>{activeDelivery.quantity || 'N/A'}</Text>
+                </View>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}>
+                  <Text style={{ color: '#555', fontWeight: '600' }}>Status:</Text>
+                  <Text style={{ color: '#ff9800', fontWeight: 'bold' }}>In Transit 🚚</Text>
+                </View>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#2e7d32', borderRadius: 12, paddingVertical: 14,
+                    alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 10,
+                  }}
+                  onPress={() => {
+                    Alert.alert(
+                      'Confirm Delivery',
+                      'Are you sure this delivery has been completed?',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Yes, Delivered', onPress: () => handleCompleteDelivery(activeDelivery.id) },
+                      ]
+                    );
+                  }}
+                >
+                  <FontAwesome5 name="check-circle" size={20} color="#fff" />
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17 }}>Mark as Delivered</Text>
+                </TouchableOpacity>
+              </View>
+            )}
             <Text style={styles.deliveryRequestsTitle}>Delivery Requests</Text>
             {pendingDonations.length > 0 ? (
               <ScrollView style={styles.requestsScrollView} contentContainerStyle={styles.requestsScrollContent}>
@@ -682,48 +766,87 @@ export default function VolunteerDashboard({ userData, onLogout }) {
           )}
           </View>
         </View>
+      ) : activeMenu === 'Food Quality Check' ? (
+        <FoodQualityScreen />
       ) : (
         <>
           <ScrollView contentContainerStyle={styles.feed}>
-            {/* New Opportunities Card */}
-            <View style={styles.cardOpportunity}>
-              <Text style={styles.cardTitle}>New Opportunity</Text>
-              <Image source={feedCards[0].image} style={styles.cardImage} />
-              <Text style={styles.cardBody}>{feedCards[0].text}</Text>
-              <TouchableOpacity style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>{feedCards[0].cta}</Text>
-              </TouchableOpacity>
+            {/* Welcome Card */}
+            <View style={styles.cardWelcome}>
+              <Text style={styles.cardWelcomeText}>Welcome back, {userData.name ? userData.name.split(' ')[0] : 'Volunteer'}! See the difference you are making.</Text>
             </View>
-            {/* Schedule Reminder Card */}
-            <View style={styles.cardSchedule}>
-              <Text style={styles.cardTitle}>Schedule Reminder</Text>
-              <Text style={styles.cardBody}>{feedCards[1].text}</Text>
-              <TouchableOpacity style={styles.ctaBtn}>
-                <Text style={styles.ctaBtnText}>{feedCards[1].cta}</Text>
-              </TouchableOpacity>
+            {/* Impact Metrics */}
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 14, gap: 10 }}>
+              <View style={{ flex: 1, backgroundColor: '#e8f5e9', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+                <FontAwesome5 name="utensils" size={22} color="#2e7d32" />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#2e7d32', marginTop: 6 }}>{metricsLoading ? '...' : totalMeals}</Text>
+                <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Meals Delivered</Text>
+              </View>
+              <View style={{ flex: 1, backgroundColor: '#e3f2fd', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+                <FontAwesome5 name="box-open" size={22} color="#1976d2" />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#1976d2', marginTop: 6 }}>{metricsLoading ? '...' : totalDelivered}</Text>
+                <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Deliveries Done</Text>
+              </View>
+              <View style={{ flex: 1, backgroundColor: '#fff3e0', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
+                <FontAwesome5 name="hands-helping" size={22} color="#f57c00" />
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#f57c00', marginTop: 6 }}>{metricsLoading ? '...' : activeDonors}</Text>
+                <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Active Donors</Text>
+              </View>
             </View>
-            {/* Impact & Thank You Card */}
-            <View style={styles.cardImpact}>
-              <Text style={styles.cardTitle}>Impact & Thank You</Text>
-              <Image source={feedCards[2].image} style={styles.cardImage} />
-              <Text style={styles.cardBody}>{feedCards[2].text}</Text>
-            </View>
-            {/* Milestone & Recognition Card */}
-            <View style={styles.cardMilestone}>
-              <Text style={styles.cardTitle}>Milestone</Text>
-              <Text style={styles.cardBody}>{feedCards[3].text}</Text>
-            </View>
-            {/* Team Announcement Card */}
-            <View style={styles.cardAnnouncement}>
-              <Text style={styles.cardTitle}>Team Announcement</Text>
-              <Text style={styles.cardBody}>{feedCards[4].text}</Text>
-            </View>
+            {/* Real-time Feed Posts */}
+            {feedPosts.map(post => (
+              <View key={post.id} style={styles.feedPostCard}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                  <Text style={styles.feedPostAuthor}>{post.userName || 'Anonymous'}</Text>
+                  {post.role ? <Text style={{ backgroundColor: '#e8f5e9', color: '#2e7d32', fontSize: 11, fontWeight: 'bold', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginLeft: 8 }}>{post.role}</Text> : null}
+                </View>
+                <Text style={styles.feedPostContent}>{post.message || ''}</Text>
+                <View style={styles.feedPostActions}>
+                  <TouchableOpacity
+                    onPress={() => handleToggleLikePost(post.id)}
+                    style={styles.feedPostActionBtn}
+                  >
+                    <FontAwesome5
+                      name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"}
+                      size={16}
+                      color={likedPosts[post.id] ? "#2e7d32" : "#888"}
+                    />
+                    <Text style={[
+                      styles.feedPostActionText,
+                      likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }
+                    ]}>
+                      {likedPosts[post.id] ? "Liked" : "Like"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.feedPostComments}>
+                  {(post.comments || []).map((c, idx) => (
+                    <View key={idx} style={styles.feedPostComment}>
+                      <Text style={styles.feedPostCommentAuthor}>{c.author}:</Text>
+                      <Text style={styles.feedPostCommentText}>{c.text}</Text>
+                    </View>
+                  ))}
+                  <View style={styles.feedPostCommentInputRow}>
+                    <TextInput
+                      style={styles.feedPostCommentInput}
+                      value={commentInputs[post.id] || ''}
+                      onChangeText={text => setCommentInputs({ ...commentInputs, [post.id]: text })}
+                      placeholder="Write a comment..."
+                    />
+                    <TouchableOpacity onPress={() => handleAddComment(post.id)} style={styles.feedPostCommentBtn}>
+                      <Text style={styles.feedPostCommentBtnText}>Post</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            ))}
+            {feedPosts.length === 0 && (
+              <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+                <Text style={{ color: '#999', fontSize: 16 }}>No posts yet. Tap the compose button to get started!</Text>
+              </View>
+            )}
             <View style={{ height: 80 }} />
           </ScrollView>
-          {/* Floating Compose Button */}
-          <TouchableOpacity style={styles.fab} onPress={handleOpenPostModal}>
-            <FontAwesome5 name="pen" size={24} color="#fff" />
-          </TouchableOpacity>
           {/* Post Compose Modal */}
           {showPostModal && (
             <View style={styles.postModalOverlay}>
@@ -797,6 +920,7 @@ export default function VolunteerDashboard({ userData, onLogout }) {
               <DrawerItem icon="clock" label="Log My Hours" active={activeMenu === 'Log My Hours'} onPress={() => handleMenuSelect('Log My Hours')} />
               <DrawerItem icon="chart-bar" label="My Impact Summary" active={activeMenu === 'My Impact Summary'} onPress={() => handleMenuSelect('My Impact Summary')} />
               <DrawerItem icon="book" label="Training & Resources" active={activeMenu === 'Training & Resources'} onPress={() => handleMenuSelect('Training & Resources')} />
+              <DrawerItem icon="camera" label="Food Quality Check" active={activeMenu === 'Food Quality Check'} onPress={() => handleMenuSelect('Food Quality Check')} />
               <DrawerItem icon="cog" label="Settings" active={activeMenu === 'Settings'} onPress={() => handleMenuSelect('Settings')} />
             </View>
             <TouchableOpacity style={styles.drawerLogout} onPress={onLogout}>

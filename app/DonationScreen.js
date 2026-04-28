@@ -47,12 +47,27 @@
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
-import { addDoc, collection, getFirestore, Timestamp } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import { collection, doc, getDocs, getFirestore, query, runTransaction, serverTimestamp, Timestamp, where } from 'firebase/firestore';
+import { appendDonationHistoryEvent, resolveUserProfile } from '../services/donationHistoryService';
 import React, { useState } from 'react';
 import { ActivityIndicator, Alert, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
 import { app } from '../firebaseConfig';
+
+// Helper function to calculate distance using Haversine formula
+function getDistanceKm(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => deg * Math.PI / 180;
+  const R = 6371; // Earth's radius in km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
 export default function DonationScreen({ navigation }) {
   const [foodItem, setFoodItem] = useState('');
@@ -70,7 +85,7 @@ export default function DonationScreen({ navigation }) {
   const [showBeneficiaryModal, setShowBeneficiaryModal] = useState(false);
   const db = getFirestore(app);
 
-  // Handlers
+  // Handle photo from gallery
   const handleChoosePhoto = async () => {
     let result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
@@ -79,7 +94,26 @@ export default function DonationScreen({ navigation }) {
       quality: 0.7,
     });
     if (!result.canceled && result.assets && result.assets.length > 0) {
-      setPhotoUri(result.assets[0].uri);
+      const uri = result.assets[0].uri;
+      setPhotoUri(uri);
+    }
+  };
+
+  // Handle photo from camera
+  const handleTakePhoto = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Camera permission is needed to check food quality.');
+      return;
+    }
+    let result = await ImagePicker.launchCameraAsync({
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 0.7,
+    });
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      const uri = result.assets[0].uri;
+      setPhotoUri(uri);
     }
   };
 
@@ -102,19 +136,58 @@ export default function DonationScreen({ navigation }) {
       };
       setLocationInfo(info);
 
-      // Fetch sorted beneficiaries from backend API
-      const apiUrl = `https://us-central1-hungeraid-60fb6.cloudfunctions.net/getNearestBeneficiaries?latitude=${loc.coords.latitude}&longitude=${loc.coords.longitude}`;
-      const resp = await fetch(apiUrl);
-      const data = await resp.json();
-      if (data.beneficiaries && Array.isArray(data.beneficiaries)) {
-        setBeneficiaries(data.beneficiaries);
-        setShowBeneficiaryModal(true); // Show modal to pick beneficiary
+      // Fetch beneficiaries directly from Firestore
+      console.log('Fetching beneficiaries from Firestore...');
+      const beneficiariesQuery = query(
+        collection(db, 'users'),
+        where('role', '==', 'Beneficiary')
+      );
+      const beneficiariesSnap = await getDocs(beneficiariesQuery);
+      
+      const beneficiariesList = [];
+      beneficiariesSnap.forEach((docSnap) => {
+        const user = docSnap.data();
+        console.log('Checking user:', docSnap.id, user);
+        
+        if (user.location && 
+            typeof user.location.latitude === 'number' && 
+            typeof user.location.longitude === 'number') {
+          const distance = getDistanceKm(
+            loc.coords.latitude, 
+            loc.coords.longitude, 
+            user.location.latitude, 
+            user.location.longitude
+          );
+          beneficiariesList.push({
+            id: docSnap.id,
+            name: user.name || 'Beneficiary',
+            address: user.address || 'No address provided',
+            location: user.location,
+            distance
+          });
+          console.log('Added beneficiary:', docSnap.id, 'at distance', distance, 'km');
+        } else {
+          console.log('Skipping user (no valid location):', docSnap.id);
+        }
+      });
+      
+      // Sort by distance ascending
+      beneficiariesList.sort((a, b) => a.distance - b.distance);
+      console.log('Total beneficiaries found:', beneficiariesList.length);
+      
+      if (beneficiariesList.length > 0) {
+        setBeneficiaries(beneficiariesList);
+        setShowBeneficiaryModal(true);
       } else {
         setBeneficiaries([]);
-        Alert.alert('No beneficiaries found nearby.');
+        Alert.alert(
+          'No Beneficiaries Found', 
+          'No beneficiaries with location data found. Please ensure beneficiaries have set their location in their profile.'
+        );
       }
     } catch (e) {
-      Alert.alert('Error', 'Could not fetch location or beneficiaries.');
+      console.error('Error fetching location or beneficiaries:', e);
+      Alert.alert('Error', `Could not fetch location or beneficiaries: ${e.message || e}`);
     }
     setIsLoading(false);
   };
@@ -160,6 +233,9 @@ export default function DonationScreen({ navigation }) {
               return;
             }
 
+            const donorProfile = await resolveUserProfile(db, currentUser.uid, currentUser.displayName || 'Donor');
+            const donationRef = doc(collection(db, 'donations'));
+            const createdAtIso = new Date().toISOString();
             const donationData = {
               foodItem,
               foodType,
@@ -167,18 +243,51 @@ export default function DonationScreen({ navigation }) {
               quantity: Number(quantity),
               photoUri,
               location: locationInfo ? locationInfo.coords : null,
-              createdAt: new Date().toISOString(),
+              createdAt: createdAtIso,
               donorId: currentUser.uid,
+              donorName: donorProfile.name,
               status: 'Offered',
+              deliveryStatus: 'offered',
               offeredTo: selectedBeneficiary.id,
+              beneficiaryName: selectedBeneficiary.name || 'Beneficiary',
               offerExpiry
             };
             try {
-              await addDoc(collection(db, 'donations'), donationData);
+              // Debug: log the authenticated user and donation payload to help trace permission issues
+              console.log('DonationScreen: creating donation as user:', currentUser.uid, 'payload:', {
+                donorId: currentUser.uid,
+                offeredTo: selectedBeneficiary.id,
+                foodItem,
+                quantity: Number(quantity),
+              });
+
+              await runTransaction(db, async (transaction) => {
+                transaction.set(donationRef, {
+                  ...donationData,
+                  createdAt: serverTimestamp(),
+                  createdAtIso,
+                  updatedAt: serverTimestamp(),
+                });
+
+                appendDonationHistoryEvent(transaction, db, {
+                  donationId: donationRef.id,
+                  eventType: 'offered',
+                  status: 'Offered',
+                  deliveryStatus: 'offered',
+                  donationData,
+                  actor: {
+                    userId: currentUser.uid,
+                    name: donorProfile.name,
+                    role: 'donor',
+                  },
+                  notes: 'Donation offered by donor.',
+                });
+              });
               Alert.alert('Success', 'Your donation has been posted!');
             } catch (e) {
-              console.error('Error creating donation:', e);
-              Alert.alert('Error creating donation', e && e.message ? e.message : String(e));
+              // Log detailed error info for diagnosis
+              console.error('Error creating donation:', e, 'code:', e?.code, 'details:', e?.details || e?.message);
+              Alert.alert('Error creating donation', `${e?.code || 'permission-denied'}: ${e?.message || String(e)}`);
             }
           } }
       ]
@@ -329,14 +438,31 @@ export default function DonationScreen({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      {/* Upload Photo */}
-      <Text style={styles.label}>Photo</Text>
-      <TouchableOpacity style={styles.uploadBtn} onPress={handleChoosePhoto}>
-        <Text style={styles.uploadBtnText}>{photoUri ? 'Change Photo' : 'Upload Photo'}</Text>
-      </TouchableOpacity>
+      {/* Food Photo & Quality Check */}
+      <Text style={styles.label}>Food Photo & Quality Check</Text>
+      <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10 }}>
+        <TouchableOpacity
+          style={[styles.uploadBtn, { flex: 1, backgroundColor: '#2e7d32', flexDirection: 'row', justifyContent: 'center', gap: 8 }]}
+          onPress={handleTakePhoto}
+        >
+          <Text style={styles.uploadBtnText}>📷 Take Photo</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.uploadBtn, { flex: 1, flexDirection: 'row', justifyContent: 'center', gap: 8 }]}
+          onPress={handleChoosePhoto}
+        >
+          <Text style={styles.uploadBtnText}>🖼️ Gallery</Text>
+        </TouchableOpacity>
+      </View>
       {photoUri && (
         <Image source={{ uri: photoUri }} style={styles.photoPreview} />
       )}
+
+      <View style={{ backgroundColor: '#e3f2fd', borderRadius: 12, padding: 10, marginBottom: 12 }}>
+        <Text style={{ color: '#1565c0', fontSize: 13, fontWeight: '600' }}>
+          Tip: Use Food Quality Check from the menu for offline spoilage assessment before posting.
+        </Text>
+      </View>
 
       {/* Location */}
       <Text style={styles.label}>Location</Text>

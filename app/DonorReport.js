@@ -248,7 +248,7 @@ export default function DonorReportScreen() {
               style={styles.featuredImage}
             />
             <Text style={[styles.featuredText, isDark && { color: '#fff' }]}>
-              Your contribution to <Text style={{ fontWeight: 'bold', color: '#1976d2' }}>'Education Kits'</Text> helped 50 children start their school year with all the necessary supplies.
+              Your contribution to <Text style={{ fontWeight: 'bold', color: '#1976d2' }}>Education Kits</Text> helped 50 children start their school year with all the necessary supplies.
             </Text>
           </View>
         </>

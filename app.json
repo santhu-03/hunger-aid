@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "HungerAid",
-    "slug": "HungerAid",
+    "slug": "hunger-aid",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -12,8 +12,10 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "HungerAid needs your location to enable transport request features.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "HungerAid needs your location to enable transport request features."
-      }
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "HungerAid needs your location to enable transport request features.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.santhu03.HungerAid"
     },
     "android": {
       "adaptiveIcon": {
@@ -26,8 +28,11 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION"
-      ]
+        "ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
+      "package": "com.santhu03.HungerAid"
     },
     "web": {
       "output": "static",
@@ -57,6 +62,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b969a1e0-ff9f-4791-8eb4-d0c53b299100"
+      }
+    },
+    "owner": "santhu-03"
   }
 }
