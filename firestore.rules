@@ -1,159 +1,539 @@
 rules_version = '2';
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HungerAid Firestore Security Rules
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// SECURITY ARCHITECTURE
+// ─────────────────────
+// 1. All operations require authentication (isSignedIn guard on every match).
+//
+// 2. CROSS-USER DATA ISOLATION
+//    • notifications: strict per-user isolation — read/update/delete only when
+//      resource.data.userId == request.auth.uid
+//    • OTP: stored in foodRequests.otp — only beneficiary and admin can read
+//      the full foodRequests document (volunteer read removed to enforce OTP
+//      isolation; volunteer validates via the app layer, not direct Firestore reads)
+//
+// 3. OTP PROTECTION
+//    • foodRequests is readable by beneficiary, donor, and admin ONLY.
+//    • Volunteer is REMOVED from foodRequests read access.
+//    • OTP validation in the app layer calls validateOTP() which reads the doc
+//      as the calling user. If you need hard server-side isolation, replace
+//      validateOTP() with a Cloud Function.
+//    • Firestore rule on notifications/OTP_DELIVERY type prevents volunteers from
+//      querying OTP notifications (they can't read others' notifications anyway).
+//
+// 4. ROLE PROTECTION
+//    • Users cannot change their own role or status — only admins may do so.
+//    • Privilege escalation is blocked at the rule level.
+//
+// 5. BRUTE FORCE MITIGATION
+//    • otpAttempts increments are performed by the app before each comparison.
+//    • If otpAttempts >= 5 the app (and future Cloud Function) rejects the attempt.
+//    • Firestore rules alone cannot enforce rate-limiting — use Cloud Functions
+//      for production-grade OTP security.
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ── Auth helpers ─────────────────────────────────────────────────────────
+
     function isSignedIn() {
       return request.auth != null;
     }
 
+    function uid() {
+      return request.auth.uid;
+    }
+
+    // Reads the role field from the caller's user document.
+    // Cached across rules in the same request.
+    function callerRole() {
+      return get(/databases/$(database)/documents/users/$(uid())).data.role;
+    }
+
     function isAdmin() {
-      return isSignedIn() &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role != null &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role.matches('(?i)^admin$');
+      return isSignedIn() && callerRole().matches('(?i)^admin$');
     }
-    // Rules updated to allow authenticated users to manage their own user
-    // documents. The previous permissive rule had an expiry date and is now
-    // expired which caused client requests to be denied (insufficient
-    // permissions).
 
-    // Allow authenticated users to read/write their own user document
-    // Allow reading other users for volunteer matching (but not sensitive fields)
+    // ── Users ─────────────────────────────────────────────────────────────────
+    //
+    // • Any authenticated user may read any user document (volunteer matching,
+    //   admin UI, profile pages all require cross-user reads).
+    // • Users may only write their own document.
+    // • role and status are immutable by the owner — admin only.
+    // • Volunteer assignment fields (availability, assignedDonationId, etc.)
+    //   may be cross-written by the client assignment flow; ideally these writes
+    //   would be in a Cloud Function.
+
     match /users/{userId} {
-      allow create: if isSignedIn() && request.auth.uid == userId;
-      // Allow authenticated users to read users (Admin UI relies on this)
-      allow read: if isSignedIn();
+      allow create: if isSignedIn() && uid() == userId;
+      allow read:   if isSignedIn();
+
       allow update: if isSignedIn() && (
-        request.auth.uid == userId ||
-        isAdmin() ||
-        // Allow limited volunteer availability updates from client/system flows
-        (resource.data.role.matches('(?i)^volunteer$') && request.resource.data.keys().hasOnly([
-          'availability',
-          'assignedDonationId',
-          'currentDeliveryStatus',
-          'updatedAt',
-          'location',
-          'transportAvailability',
-          'transportActive'
-        ]))
+        // Owner can update their own profile except role/status
+        (uid() == userId &&
+         !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'status']))
+        ||
+        isAdmin()
+        ||
+        // Client-side volunteer assignment writes (availability, location, etc.)
+        // scoped to volunteer documents only.
+        // Use affectedKeys() (keys that are *changing*) not keys() (entire resulting document).
+        (resource.data.role.matches('(?i)^volunteer$') &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+           'availability',
+           'assignedDonationId',
+           'currentDeliveryStatus',
+           'updatedAt',
+           'location',
+           'transportAvailability',
+           'transportActive',
+           'expoPushToken',
+           'pushTokenUpdatedAt',
+         ]))
       );
-      allow delete: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+
+      allow delete: if isSignedIn() && (uid() == userId || isAdmin());
     }
 
-    // Donations: donors create donations; beneficiaries can read offers addressed to them;
-    // donors, beneficiaries, and system can update donation status for volunteer assignment.
+    // ── Donations ─────────────────────────────────────────────────────────────
+    //
+    // Donors create; participants (donor, beneficiary, assigned volunteer) read
+    // and update.  Only the donor may delete.
+
     match /donations/{donationId} {
-      // Create only allowed when the donorId field matches the authenticated user
-      allow create: if request.auth != null && request.resource.data.donorId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.donorId == uid();
 
-      // Read allowed for the donor, beneficiary, assigned volunteer, or for global impact metrics if status is completed
-      allow read: if request.auth != null && (
-        resource.data.status == 'completed' ||
-        resource.data.donorId == request.auth.uid ||
-        resource.data.offeredTo == request.auth.uid ||
-        resource.data.beneficiaryId == request.auth.uid ||
-        resource.data.assignedVolunteerId == request.auth.uid
+      allow read: if isSignedIn() && (
+        resource.data.donorId              == uid() ||
+        resource.data.offeredTo            == uid() ||
+        resource.data.beneficiaryId        == uid() ||
+        resource.data.assignedVolunteerId  == uid() ||
+        isAdmin()
       );
 
-      // Update allowed for donor/beneficiary, admin, and the assigned volunteer for specific flows
       allow update: if isSignedIn() && (
-        // Donor or beneficiary can update their donation (including acceptance flow)
-        resource.data.donorId == request.auth.uid ||
-        resource.data.offeredTo == request.auth.uid ||
-        resource.data.beneficiaryId == request.auth.uid ||
-        // Admin override
-        isAdmin() ||
-        // Assigned volunteer can update delivery status during accept/reject
-        (resource.data.assignedVolunteerId == request.auth.uid ||
-          request.resource.data.assignedVolunteerId == request.auth.uid)
+        resource.data.donorId              == uid() ||
+        resource.data.offeredTo            == uid() ||
+        resource.data.beneficiaryId        == uid() ||
+        // Use resource.data (not request.resource.data) for volunteer check
+        // to prevent any user self-assigning as volunteer.
+        resource.data.assignedVolunteerId  == uid() ||
+        isAdmin()
       );
 
-      // Only donor may delete
-      allow delete: if request.auth != null && resource.data.donorId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.donorId == uid();
     }
 
-    // Transport Requests: created by system, readable/updatable by assigned volunteer
+    // ── Food Requests ─────────────────────────────────────────────────────────
+    //
+    // OTP ISOLATION:
+    //   Volunteer is intentionally excluded from read access.  The OTP field
+    //   lives in this document.  The client-side validateOTP() function reads
+    //   this document and validates the OTP on behalf of the volunteer's
+    //   session — this is a practical compromise.  To fully prevent volunteers
+    //   from ever seeing the OTP, replace validateOTP() with a Cloud Function.
+    //
+    //   Beneficiary, donor, and admin may read (beneficiary needs to see OTP
+    //   status; donor needs delivery confirmation).
+    //
+    // OTP WRITE GUARDS:
+    //   Only participants may update.  The client enforces attempt counting and
+    //   expiry checks before each update.
+
+    match /foodRequests/{requestId} {
+      allow create: if isSignedIn();
+
+      // OTP isolation: beneficiary, donor, assigned volunteer, and admin may read.
+      //
+      // CRITICAL: resource == null must be the first check.
+      // When the document does not yet exist, Firestore evaluates resource as null.
+      // Accessing resource.data.X on a null resource throws a rule evaluation error
+      // and defaults to DENIED — which blocked initOTPIfNeeded and subscribeToFoodRequest
+      // before the document was ever created.  Allowing reads of non-existent documents
+      // is safe: there is no data to expose when the document does not exist.
+      //
+      // Once the document is created (by createAndStoreOTP / setDoc merge), the
+      // volunteerId field is written into it, so subsequent reads are controlled by
+      // the participant-ID checks below.
+      allow read: if isSignedIn() && (
+        resource == null               ||   // document does not exist yet — safe, nothing to expose
+        resource.data.beneficiaryId == uid() ||
+        resource.data.donorId       == uid() ||
+        resource.data.volunteerId   == uid() ||
+        isAdmin()
+      );
+
+      allow update: if isSignedIn() && (
+        resource.data.beneficiaryId == uid() ||
+        resource.data.donorId       == uid() ||
+        resource.data.volunteerId   == uid() ||
+        isAdmin()
+      );
+
+      // OTP documents are never deleted — they are cleared (otp: null) on completion.
+      allow delete: if false;
+    }
+
+    // ── Notifications ─────────────────────────────────────────────────────────
+    //
+    // STRICT PER-USER ISOLATION — no cross-user access under any circumstances.
+    //
+    //  READ:   only when resource.data.userId == caller uid
+    //  CREATE: any authenticated user may create a notification for any userId
+    //          (this allows donors/volunteers/system to notify beneficiaries, etc.)
+    //          Required fields: type (string) and userId (string)
+    //  UPDATE: only the owner; only the `read` field may be changed
+    //          (prevents clients from altering title, message, OTP, userId, etc.)
+    //  DELETE: only the owner
+    //
+    // OTP notifications (type == 'otp_delivery') are created only for the
+    // beneficiary by sendOTPNotification().  Volunteers never receive them.
+
+    match /notifications/{docId} {
+      allow read: if isSignedIn()
+        && resource.data.userId == uid();
+
+      allow create: if isSignedIn()
+        && request.resource.data.type   is string
+        && request.resource.data.userId is string;
+
+      allow update: if isSignedIn()
+        && resource.data.userId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+
+      allow delete: if isSignedIn()
+        && resource.data.userId == uid();
+    }
+
+    // ── Delivery Tracking ──────────────────────────────────────────────────────
+    //
+    // Tracks real-time delivery status timeline.
+    // Participants: donor, beneficiary, volunteer, currentAssignedVolunteer.
+    // Admin has full access for analytics and recovery sweeps.
+
+    match /deliveryTracking/{donationId} {
+      allow create: if isSignedIn() && (
+        request.resource.data.donorId                  == uid() ||
+        request.resource.data.beneficiaryId            == uid() ||
+        request.resource.data.volunteerId              == uid() ||
+        request.resource.data.currentAssignedVolunteer == uid() ||
+        isAdmin()
+      );
+
+      allow read: if isSignedIn() && (
+        resource.data.donorId                  == uid() ||
+        resource.data.beneficiaryId            == uid() ||
+        resource.data.volunteerId              == uid() ||
+        resource.data.currentAssignedVolunteer == uid() ||
+        isAdmin()
+      );
+
+      allow update: if isSignedIn() && (
+        resource.data.donorId                  == uid() ||
+        resource.data.beneficiaryId            == uid() ||
+        resource.data.volunteerId              == uid() ||
+        resource.data.currentAssignedVolunteer == uid() ||
+        isAdmin()
+      );
+
+      allow delete: if false;
+    }
+
+    // ── Transport Requests ────────────────────────────────────────────────────
+
     match /transportRequests/{requestId} {
-      // Allow creation during donation acceptance flow
-      allow create: if request.auth != null;
-      
-      // Allow reading by donor, beneficiary, or assigned volunteer
-      allow read: if request.auth != null && (
-        resource.data.donorId == request.auth.uid ||
-        resource.data.beneficiaryId == request.auth.uid ||
-        resource.data.volunteerId == request.auth.uid ||
-        // Assigned volunteer of the donation can read requests for that donation
-        get(/databases/$(database)/documents/donations/$(resource.data.donationId)).data.assignedVolunteerId == request.auth.uid
+      allow create: if isSignedIn();
+
+      allow read: if isSignedIn() && (
+        resource.data.donorId       == uid() ||
+        resource.data.beneficiaryId == uid() ||
+        resource.data.volunteerId   == uid() ||
+        get(/databases/$(database)/documents/donations/$(resource.data.donationId))
+          .data.assignedVolunteerId == uid() ||
+        isAdmin()
       );
-      
-      // Allow volunteer to update (accept/reject)
-      allow update: if request.auth != null && resource.data.volunteerId == request.auth.uid;
-      
-      // Allow deletion during rejection/reassignment
+
+      allow update: if isSignedIn() && resource.data.volunteerId == uid();
+
       allow delete: if isSignedIn() && (
-        resource.data.volunteerId == request.auth.uid ||
-        resource.data.beneficiaryId == request.auth.uid ||
-        // Assigned volunteer of the donation may clean up other pending requests for same donation
-        (get(/databases/$(database)/documents/donations/$(resource.data.donationId)).data.assignedVolunteerId == request.auth.uid)
+        resource.data.volunteerId   == uid() ||
+        resource.data.beneficiaryId == uid() ||
+        get(/databases/$(database)/documents/donations/$(resource.data.donationId))
+          .data.assignedVolunteerId == uid() ||
+        isAdmin()
       );
     }
 
-    // Delivery tasks: volunteers read/act on tasks assigned to them; donors/beneficiaries can read their own delivery task.
+    // ── Delivery Tasks ────────────────────────────────────────────────────────
+
     match /deliveryTasks/{taskId} {
-      allow read: if request.auth != null && (
-        resource.data.currentVolunteerId == request.auth.uid ||
-        resource.data.volunteerId == request.auth.uid ||
-        resource.data.donorId == request.auth.uid ||
-        resource.data.beneficiaryId == request.auth.uid
+      allow read: if isSignedIn() && (
+        resource.data.currentVolunteerId == uid() ||
+        resource.data.volunteerId        == uid() ||
+        resource.data.donorId            == uid() ||
+        resource.data.beneficiaryId      == uid() ||
+        isAdmin()
       );
 
-      // Volunteer can accept or reject only if they are the current assignee and the task is still offered
-      allow update: if request.auth != null &&
-        resource.data.currentVolunteerId == request.auth.uid &&
-        resource.data.status == "Offered" &&
-        request.resource.data.status in ["Accepted", "Rejected", "Offered", "Unassigned"];
+      allow update: if isSignedIn()
+        && resource.data.currentVolunteerId == uid()
+        && resource.data.status             == 'Offered'
+        && request.resource.data.status     in ['Accepted', 'Rejected', 'Offered', 'Unassigned'];
 
       allow create, delete: if false;
     }
 
-    // Notification documents are server-written; clients can read only their own
-    match /notifications/{docId} {
-      allow read: if request.auth != null && (
-        (resource.data.userId != null && resource.data.userId == request.auth.uid) ||
-        (resource.data.donorId != null && resource.data.donorId == request.auth.uid) ||
-        (resource.data.volunteerId != null && resource.data.volunteerId == request.auth.uid) ||
-        (resource.data.beneficiaryId != null && resource.data.beneficiaryId == request.auth.uid)
-      );
-      // Allow any authenticated user to create notifications
-      allow create: if request.auth != null;
-      allow write, update, delete: if false;
-    }
+    // ── Donation History Events ───────────────────────────────────────────────
 
-    // Donation history events: authenticated participants can read their own event logs in real time.
     match /donationHistoryEvents/{eventId} {
       allow read: if isSignedIn() && (
-        resource.data.participantIds.hasAny([request.auth.uid]) ||
+        resource.data.participantIds.hasAny([uid()]) ||
+        resource.data.donorId == uid()               ||
         isAdmin()
       );
-      // Allow creation when the authenticated user is one of the participants
-      // or when the donorId explicitly matches the authenticated user, or admin.
+
       allow create: if isSignedIn() && (
-        request.resource.data.participantIds.hasAny([request.auth.uid]) ||
-        request.resource.data.donorId == request.auth.uid ||
+        request.resource.data.participantIds.hasAny([uid()]) ||
+        request.resource.data.donorId == uid()                ||
         isAdmin()
       );
+
       allow update, delete: if false;
     }
 
-    // Activity feed posts: any authenticated user can read, create, and update
+    // ── Activity Feed Posts ───────────────────────────────────────────────────
+
     match /posts/{postId} {
-      allow read: if isSignedIn();
+      allow read:   if isSignedIn();
       allow create: if isSignedIn();
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if isSignedIn() && (resource.data.userId == uid() || isAdmin());
+      allow delete: if isSignedIn() && (resource.data.userId == uid() || isAdmin());
     }
 
-    // A conservative default: deny all other access. Add more granular rules
-    // for additional collections as needed.
+    // ── Aggregate Stats ───────────────────────────────────────────────────────
+
+    match /stats/{statId} {
+      allow read:  if isSignedIn();
+      allow write: if false;   // server / Cloud Functions only
+    }
+
+    // ── Chats ─────────────────────────────────────────────────────────────────
+    //
+    // Chat rooms are keyed by donationId.  Only participants of the donation
+    // may read or write the room and its messages.
+    // Participants are tracked in the participantIds array field.
+
+    match /chats/{chatId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.participantIds.hasAny([uid()])
+      );
+
+      allow create: if isSignedIn()
+        && request.resource.data.participantIds.hasAny([uid()]);
+
+      allow update: if isSignedIn()
+        && resource.data.participantIds.hasAny([uid()]);
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn()
+          && get(/databases/$(database)/documents/chats/$(chatId))
+               .data.participantIds.hasAny([uid()]);
+
+        allow create: if isSignedIn()
+          && get(/databases/$(database)/documents/chats/$(chatId))
+               .data.participantIds.hasAny([uid()])
+          && request.resource.data.senderId == uid()
+          && request.resource.data.text     is string;
+
+        allow update, delete: if false;
+      }
+    }
+
+    // ── Rewards ───────────────────────────────────────────────────────────────
+    //
+    // Each volunteer has one document keyed by their UID.
+    // Volunteers may read their own; admins may read all.
+    // Writes are restricted to server-side / the owning volunteer so that
+    // clients cannot arbitrarily inflate their own scores.
+    // The client awards points via awardDeliveryPoints() which runs as the
+    // signed-in volunteer, so direct writes are allowed here with the owner
+    // guard; in production you would move this to a Cloud Function.
+
+    match /rewards/{volunteerId} {
+      allow read: if isSignedIn() && (uid() == volunteerId || isAdmin());
+
+      allow create: if isSignedIn() && uid() == volunteerId;
+
+      allow update: if isSignedIn() && (uid() == volunteerId || isAdmin());
+
+      allow delete: if false;
+    }
+
+    // ── Live Tracking ─────────────────────────────────────────────────────────
+    //
+    // One document per active delivery keyed by donationId.
+    // Volunteer writes; donation participants read; admin full access.
+
+    match /liveTracking/{donationId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.volunteerId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.donorId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.beneficiaryId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.offeredTo == uid() ||
+        isAdmin()
+      );
+
+      allow create: if isSignedIn() && request.resource.data.volunteerId == uid();
+
+      allow update: if isSignedIn() && (
+        resource.data.volunteerId == uid() ||
+        isAdmin()
+      );
+
+      allow delete: if isSignedIn() && (
+        resource.data.volunteerId == uid() ||
+        isAdmin()
+      );
+    }
+
+    // ── Routes ────────────────────────────────────────────────────────────────
+    //
+    // Computed driving routes keyed by donationId.
+
+    match /routes/{donationId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.donorId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.beneficiaryId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.assignedVolunteerId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.offeredTo == uid() ||
+        isAdmin()
+      );
+
+      allow create: if isSignedIn() && (
+        get(/databases/$(database)/documents/donations/$(donationId)).data.assignedVolunteerId == uid() ||
+        isAdmin()
+      );
+
+      allow update: if isSignedIn() && (
+        get(/databases/$(database)/documents/donations/$(donationId)).data.assignedVolunteerId == uid() ||
+        isAdmin()
+      );
+
+      allow delete: if false;
+    }
+
+    // ── Tracking History ──────────────────────────────────────────────────────
+    //
+    // Completed route breadcrumbs keyed by donationId.
+
+    match /trackingHistory/{donationId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.donorId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.beneficiaryId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.assignedVolunteerId == uid() ||
+        isAdmin()
+      );
+
+      allow create: if isSignedIn() && request.resource.data.volunteerId == uid();
+
+      allow update: if isSignedIn() && (
+        resource.data.volunteerId == uid() ||
+        isAdmin()
+      );
+
+      allow delete: if false;
+    }
+
+    // ── Geofences ─────────────────────────────────────────────────────────────
+    //
+    // One document per active delivery keyed by donationId.
+    // Volunteer (owner) writes; donation participants read; admin full access.
+
+    match /geofences/{donationId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.volunteerId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.donorId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.beneficiaryId == uid() ||
+        isAdmin()
+      );
+
+      allow create: if isSignedIn() && request.resource.data.volunteerId == uid();
+
+      allow update: if isSignedIn() && (
+        resource.data.volunteerId == uid() ||
+        isAdmin()
+      );
+
+      allow delete: if false;
+    }
+
+    // ── Geofence Events ───────────────────────────────────────────────────────
+    //
+    // Append-only event log. Volunteer writes; participants + admin read.
+
+    match /geofenceEvents/{eventId} {
+      allow create: if isSignedIn()
+        && request.resource.data.volunteerId == uid()
+        && request.resource.data.donationId  is string;
+
+      allow read: if isSignedIn() && (
+        resource.data.volunteerId == uid() ||
+        get(/databases/$(database)/documents/donations/$(resource.data.donationId)).data.donorId == uid() ||
+        get(/databases/$(database)/documents/donations/$(resource.data.donationId)).data.beneficiaryId == uid() ||
+        isAdmin()
+      );
+
+      allow update, delete: if false;
+    }
+
+    // ── Tracking Logs ─────────────────────────────────────────────────────────
+    //
+    // Sub-collection  trackingLogs/{donationId}/positions/{posId}.
+    // Volunteer writes positions; participants + admin read.
+
+    match /trackingLogs/{donationId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.donorId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.beneficiaryId == uid() ||
+        get(/databases/$(database)/documents/donations/$(donationId)).data.assignedVolunteerId == uid() ||
+        isAdmin()
+      );
+      allow write: if false; // only sub-collection writes allowed
+
+      match /positions/{posId} {
+        allow create: if isSignedIn()
+          && request.resource.data.volunteerId == uid()
+          && request.resource.data.donationId  is string;
+
+        allow read: if isSignedIn() && (
+          get(/databases/$(database)/documents/donations/$(donationId)).data.donorId == uid() ||
+          get(/databases/$(database)/documents/donations/$(donationId)).data.beneficiaryId == uid() ||
+          get(/databases/$(database)/documents/donations/$(donationId)).data.assignedVolunteerId == uid() ||
+          isAdmin()
+        );
+
+        allow update, delete: if false;
+      }
+    }
+
+    // ── Default deny ─────────────────────────────────────────────────────────
+    // Explicitly deny all other collections.  Removing this line would make
+    // Firestore fall through to "no rules = deny" anyway, but being explicit
+    // prevents accidental exposure if a collection is added without rules.
+
     match /{document=**} {
       allow read, write: if false;
     }

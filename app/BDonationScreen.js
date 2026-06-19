@@ -66,10 +66,11 @@
 
 import * as Location from 'expo-location';
 import { getAuth } from 'firebase/auth';
-import { collection, doc, getDoc, getFirestore, onSnapshot, query, setDoc, updateDoc, where } from 'firebase/firestore';
+import { collection, doc, getDoc, getFirestore, onSnapshot, query, runTransaction, serverTimestamp, setDoc, updateDoc, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { handleDonationAcceptance } from '../services/donationAcceptanceService';
+import { notifyDonationOffered } from '../services/notificationService';
 
 function formatTime(secs) {
   const m = Math.floor(secs / 60);
@@ -169,8 +170,7 @@ if (left === 0 && prevLeft > 0) {
       }, 1000);
       return () => clearInterval(interval);
     }
-    // eslint-disable-next-line
-  }, [donationDetails && donationDetails.offerExpiry]);
+  }, [donationDetails?.offerExpiry]);
 
   // Set beneficiary location in Firestore
   const handleSetLocation = async () => {
@@ -294,13 +294,6 @@ if (left === 0 && prevLeft > 0) {
         }
       }
 
-      // Update donation status to accepted by beneficiary
-      await updateDoc(donationRef, {
-        status: 'accepted_by_beneficiary',
-        beneficiaryId: currentUser.uid,
-        acceptedAt: new Date().toISOString()
-      });
-
       // Prepare locations for volunteer assignment
       const pickupLocation = {
         latitude: donationData.location.latitude,
@@ -337,25 +330,35 @@ if (left === 0 && prevLeft > 0) {
     }
   };
 
- const handleDecline = async (reason = '') => {
-  const donationId = donationDetails?.id;
-  console.log('[DECLINE DEBUG] handleDecline called', { donationId, reason, now: Date.now(), nowISO: new Date().toISOString(), offerExpiry: donationDetails?.offerExpiry });
-  if (!donationId) {
-    console.error("Error: Document ID is undefined!");
-    return;
-  }
-  const donationRef = doc(db, 'donations', donationId);
-  try {
-    await updateDoc(donationRef, {
-      status: 'Pending',
-      offeredTo: null,
-      offerExpiry: null
-    });
-    if (props.onDecline) props.onDecline(donationId);
-  } catch (error) {
-    console.error("Error during decline update:", error);
-  }
-};
+  const handleDecline = async (reason = '') => {
+    const donationId = donationDetails?.id;
+    console.log('[DECLINE DEBUG] handleDecline called', { donationId, reason });
+    if (!donationId) {
+      console.error("Error: Document ID is undefined!");
+      return;
+    }
+    const donationRef = doc(db, 'donations', donationId);
+    try {
+      await runTransaction(db, async (transaction) => {
+        const snap = await transaction.get(donationRef);
+        if (!snap.exists()) throw new Error('Donation not found');
+        transaction.update(donationRef, {
+          status: 'Pending',
+          offeredTo: null,
+          offerExpiry: null,
+          updatedAt: serverTimestamp(),
+        });
+      });
+      const data = donationDetails;
+      if (data?.donorId) {
+        notifyDonationOffered(currentUser?.uid, data.donorName || 'Donor', data.foodItem || 'donation')
+          .catch(e => console.warn('[Decline] notification error:', e.message));
+      }
+      if (props.onDecline) props.onDecline(donationId);
+    } catch (error) {
+      console.error("Error during decline update:", error);
+    }
+  };
 
   let timerColor = '#ff9800';
   if (timeLeft <= 60) timerColor = '#dc3545';

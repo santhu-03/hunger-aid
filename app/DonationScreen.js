@@ -50,10 +50,12 @@ import * as Location from 'expo-location';
 import { getAuth } from 'firebase/auth';
 import { collection, doc, getDocs, getFirestore, query, runTransaction, serverTimestamp, Timestamp, where } from 'firebase/firestore';
 import { appendDonationHistoryEvent, resolveUserProfile } from '../services/donationHistoryService';
+import { notifyDonationOffered } from '../services/notificationService';
 import React, { useState } from 'react';
 import { ActivityIndicator, Alert, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker } from '../components/MapComponents';
 import { app } from '../firebaseConfig';
+import { needsUpload, storagePaths, uploadImage } from '../services/storageService';
 
 // Helper function to calculate distance using Haversine formula
 function getDistanceKm(lat1, lon1, lat2, lon2) {
@@ -225,41 +227,45 @@ export default function DonationScreen({ navigation }) {
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Post', onPress: async () => {
-            const offerExpiry = Timestamp.fromMillis(Date.now() + 5 * 60 * 1000);
-            const auth = getAuth();
-            const currentUser = auth.currentUser;
-            if (!currentUser || !currentUser.uid) {
-              Alert.alert('Authentication required', 'You must be signed in to post a donation.');
-              return;
-            }
-
-            const donorProfile = await resolveUserProfile(db, currentUser.uid, currentUser.displayName || 'Donor');
-            const donationRef = doc(collection(db, 'donations'));
-            const createdAtIso = new Date().toISOString();
-            const donationData = {
-              foodItem,
-              foodType,
-              timePrepared: foodType === 'Cooked' ? timePrepared : null,
-              quantity: Number(quantity),
-              photoUri,
-              location: locationInfo ? locationInfo.coords : null,
-              createdAt: createdAtIso,
-              donorId: currentUser.uid,
-              donorName: donorProfile.name,
-              status: 'Offered',
-              deliveryStatus: 'offered',
-              offeredTo: selectedBeneficiary.id,
-              beneficiaryName: selectedBeneficiary.name || 'Beneficiary',
-              offerExpiry
-            };
+            setIsLoading(true);
             try {
-              // Debug: log the authenticated user and donation payload to help trace permission issues
-              console.log('DonationScreen: creating donation as user:', currentUser.uid, 'payload:', {
-                donorId: currentUser.uid,
-                offeredTo: selectedBeneficiary.id,
+              const offerExpiry = Timestamp.fromMillis(Date.now() + 5 * 60 * 1000);
+              const auth = getAuth();
+              const currentUser = auth.currentUser;
+              if (!currentUser || !currentUser.uid) {
+                Alert.alert('Authentication required', 'You must be signed in to post a donation.');
+                return;
+              }
+
+              const donorProfile = await resolveUserProfile(db, currentUser.uid, currentUser.displayName || 'Donor');
+              // Create the doc ref first so we can use its ID for the Storage path.
+              const donationRef = doc(collection(db, 'donations'));
+              const createdAtIso = new Date().toISOString();
+
+              // Upload photo to Firebase Storage before writing to Firestore.
+              let uploadedPhotoUrl = null;
+              if (photoUri && needsUpload(photoUri)) {
+                uploadedPhotoUrl = await uploadImage(
+                  photoUri,
+                  storagePaths.donationPhoto(donationRef.id),
+                );
+              }
+
+              const donationData = {
                 foodItem,
+                foodType,
+                timePrepared: foodType === 'Cooked' ? timePrepared : null,
                 quantity: Number(quantity),
-              });
+                photoUri: uploadedPhotoUrl,
+                location: locationInfo ? locationInfo.coords : null,
+                createdAt: createdAtIso,
+                donorId: currentUser.uid,
+                donorName: donorProfile.name,
+                status: 'Offered',
+                offeredTo: selectedBeneficiary.id,
+                beneficiaryName: selectedBeneficiary.name || 'Beneficiary',
+                offerExpiry,
+              };
 
               await runTransaction(db, async (transaction) => {
                 transaction.set(donationRef, {
@@ -273,7 +279,6 @@ export default function DonationScreen({ navigation }) {
                   donationId: donationRef.id,
                   eventType: 'offered',
                   status: 'Offered',
-                  deliveryStatus: 'offered',
                   donationData,
                   actor: {
                     userId: currentUser.uid,
@@ -283,11 +288,14 @@ export default function DonationScreen({ navigation }) {
                   notes: 'Donation offered by donor.',
                 });
               });
+              notifyDonationOffered(selectedBeneficiary.id, donorProfile.name, donationData.foodItem)
+                .catch(e => console.warn('[DonationScreen] notification error:', e.message));
               Alert.alert('Success', 'Your donation has been posted!');
             } catch (e) {
-              // Log detailed error info for diagnosis
-              console.error('Error creating donation:', e, 'code:', e?.code, 'details:', e?.details || e?.message);
-              Alert.alert('Error creating donation', `${e?.code || 'permission-denied'}: ${e?.message || String(e)}`);
+              console.error('Error creating donation:', e?.code, e?.message);
+              Alert.alert('Error', e?.message || String(e));
+            } finally {
+              setIsLoading(false);
             }
           } }
       ]
@@ -553,8 +561,15 @@ export default function DonationScreen({ navigation }) {
 
 
       {/* Submit */}
-      <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit}>
-        <Text style={styles.submitBtnText}>Post Donation</Text>
+      <TouchableOpacity
+        style={[styles.submitBtn, isLoading && { opacity: 0.7 }]}
+        onPress={handleSubmit}
+        disabled={isLoading}
+      >
+        {isLoading
+          ? <ActivityIndicator color="#fff" />
+          : <Text style={styles.submitBtnText}>Post Donation</Text>
+        }
       </TouchableOpacity>
     </ScrollView>
   );

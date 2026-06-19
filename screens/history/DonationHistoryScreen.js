@@ -3,6 +3,7 @@ import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, us
 import { FontAwesome5 } from '@expo/vector-icons';
 import { getAuth } from 'firebase/auth';
 import { useDonationHistory } from '../../hooks/useDonationHistory';
+import { useLiveTimeline } from '../../hooks/useLiveTimeline';
 import { formatHistoryDate, getEventLabel, getLifecycleState } from '../../services/donationHistoryService';
 
 function normalizeSearch(value) {
@@ -24,10 +25,8 @@ function matchesSearch(group, searchTerm) {
 }
 
 function getFilterMatch(group, activeFilter) {
-  if (activeFilter === 'all') return true;
   if (activeFilter === 'active') return group.lifecycleState === 'active';
   if (activeFilter === 'completed') return group.lifecycleState === 'completed';
-  if (activeFilter === 'cancelled') return group.lifecycleState === 'cancelled';
   if (activeFilter === 'failed') return group.lifecycleState === 'failed';
   return true;
 }
@@ -61,6 +60,28 @@ function TimelineEvent({ event, isLast }) {
         <Text style={styles.timelineMeta}>{event.actorName || event.actorRole || 'System'}</Text>
         {event.note ? <Text style={styles.timelineNote}>{event.note}</Text> : null}
       </View>
+    </View>
+  );
+}
+
+function LiveTimeline({ donationId, fallbackEvents, enabled }) {
+  const { timeline, loading } = useLiveTimeline(donationId, { enabled });
+  const events = timeline.length > 0 ? timeline : fallbackEvents;
+
+  if (!enabled) return null;
+  if (loading && (!events || events.length === 0)) {
+    return (
+      <View style={styles.timelineContainer}>
+        <Text style={styles.timelineMeta}>Loading live updates...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.timelineContainer}>
+      {events.map((event, index) => (
+        <TimelineEvent key={event.id || `${donationId}-${index}`} event={event} isLast={index === events.length - 1} />
+      ))}
     </View>
   );
 }
@@ -105,11 +126,7 @@ function HistoryCard({ group, expanded, onToggle }) {
       </Pressable>
 
       {expanded ? (
-        <View style={styles.timelineContainer}>
-          {group.events.map((event, index) => (
-            <TimelineEvent key={event.id} event={event} isLast={index === group.events.length - 1} />
-          ))}
-        </View>
+        <LiveTimeline donationId={group.donationId} fallbackEvents={group.events} enabled={expanded} />
       ) : null}
     </View>
   );
@@ -120,19 +137,16 @@ export default function DonationHistoryScreen({ userId, role = 'donor', title = 
   const resolvedUserId = userId || auth.currentUser?.uid || null;
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
-  const [activeFilter, setActiveFilter] = useState('all');
+  const [activeFilter, setActiveFilter] = useState('active');
   const [searchText, setSearchText] = useState('');
   const [expandedDonationId, setExpandedDonationId] = useState(null);
 
   const {
     loading,
-    loadingMore,
-    hasMore,
     error,
     historyGroups,
     summary,
-    loadMore,
-  } = useDonationHistory({ userId: resolvedUserId, role, pageSize: 20 });
+  } = useDonationHistory({ userId: resolvedUserId, role });
 
   const filteredGroups = useMemo(() => {
     const normalizedSearch = normalizeSearch(searchText);
@@ -178,7 +192,7 @@ export default function DonationHistoryScreen({ userId, role = 'donor', title = 
         <TextInput
           value={searchText}
           onChangeText={setSearchText}
-          placeholder="Search by food item, donor, beneficiary, or date"
+          placeholder="Search by date, donor, or food type"
           placeholderTextColor={isDark ? '#94a3b8' : '#94a3b8'}
           style={[styles.searchInput, isDark && styles.textLight]}
         />
@@ -186,10 +200,8 @@ export default function DonationHistoryScreen({ userId, role = 'donor', title = 
 
       <View style={styles.filterRow}>
         {[
-          ['all', 'All'],
           ['active', 'Active'],
           ['completed', 'Completed'],
-          ['cancelled', 'Cancelled'],
           ['failed', 'Failed'],
         ].map(([value, label]) => (
           <Pressable
@@ -223,19 +235,6 @@ export default function DonationHistoryScreen({ userId, role = 'donor', title = 
               <Text style={styles.emptyTitle}>No matching history</Text>
               <Text style={styles.emptyText}>{error || emptyMessage}</Text>
             </View>
-          }
-          onEndReached={() => {
-            if (hasMore && !loadingMore) {
-              loadMore();
-            }
-          }}
-          onEndReachedThreshold={0.5}
-          ListFooterComponent={
-            loadingMore ? (
-              <View style={styles.footerLoading}>
-                <ActivityIndicator size="small" color="#2e7d32" />
-              </View>
-            ) : null
           }
         />
       )}

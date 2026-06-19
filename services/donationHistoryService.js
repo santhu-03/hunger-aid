@@ -6,11 +6,13 @@ const ACTIVE_STATUSES = new Set([
   'offered',
   'accepted',
   'accepted_by_beneficiary',
-  'pending_volunteer_assignment',
-  'pending_volunteer_response',
-  'waiting_for_volunteer',
-  'waiting_for_volunteer_acceptance',
-  'assigned_to_volunteer',
+  'pending pickup',
+  'volunteer assigned',
+  'en route to donor',
+  'food picked up',
+  'out for delivery',
+  'arriving soon',
+  'delivered pending verification',
   'in_delivery',
   'accepted_by_volunteer',
 ]);
@@ -23,6 +25,7 @@ const CANCELLED_STATUSES = new Set([
 
 const FAILED_STATUSES = new Set([
   'failed',
+  'failed delivery',
   'rejected_by_volunteer',
   'rejected',
   'expired',
@@ -33,11 +36,18 @@ const EVENT_SEQUENCE_RANK = {
   offered: 10,
   accepted: 20,
   volunteer_assigned: 30,
-  in_delivery: 40,
-  delivered: 50,
-  completed: 60,
-  cancelled: 70,
-  failed: 80,
+  'pending pickup': 35,
+  'volunteer assigned': 40,
+  'en route to donor': 45,
+  'food picked up': 50,
+  'out for delivery': 60,
+  'arriving soon': 65,
+  'delivered pending verification': 70,
+  delivered: 75,
+  'completed verified': 80,
+  completed: 85,
+  cancelled: 90,
+  failed: 95,
 };
 
 function normalizeText(value) {
@@ -55,6 +65,9 @@ export function getLifecycleState(status = '', deliveryStatus = '') {
   const normalizedDeliveryStatus = normalizeText(deliveryStatus);
 
   if (normalizedStatus === 'delivered' || normalizedStatus === 'completed' || normalizedDeliveryStatus === 'completed') {
+    return 'completed';
+  }
+  if (normalizedStatus === 'completed verified') {
     return 'completed';
   }
 
@@ -75,12 +88,18 @@ export function getEventLabel(eventType = '', status = '') {
 
   if (normalizedType === 'offered' || normalizedStatus === 'offered') return 'Offered';
   if (normalizedType === 'accepted' || normalizedStatus === 'accepted' || normalizedStatus === 'accepted_by_beneficiary') return 'Accepted';
-  if (normalizedType === 'volunteer_assigned' || normalizedStatus === 'assigned_to_volunteer' || normalizedStatus === 'waiting_for_volunteer_acceptance') {
+  if (normalizedType === 'volunteer_assigned' || normalizedStatus === 'assigned_to_volunteer' || normalizedStatus === 'waiting_for_volunteer_acceptance' || normalizedStatus === 'volunteer assigned') {
     return 'Volunteer Assigned';
   }
+  if (normalizedStatus === 'pending pickup') return 'Pending Pickup';
+  if (normalizedStatus === 'en route to donor') return 'En Route to Donor';
+  if (normalizedStatus === 'food picked up') return 'Food Picked Up';
+  if (normalizedStatus === 'out for delivery') return 'Out For Delivery';
+  if (normalizedStatus === 'arriving soon') return 'Arriving Soon';
+  if (normalizedStatus === 'delivered pending verification') return 'Delivered Pending Verification';
   if (normalizedType === 'in_delivery' || normalizedStatus === 'in_delivery' || normalizedStatus === 'accepted_by_volunteer') return 'In Delivery';
   if (normalizedType === 'delivered' || normalizedStatus === 'delivered') return 'Delivered';
-  if (normalizedType === 'completed' || normalizedStatus === 'completed') return 'Completed';
+  if (normalizedType === 'completed' || normalizedStatus === 'completed' || normalizedStatus === 'completed verified') return 'Completed';
   if (normalizedType === 'cancelled' || CANCELLED_STATUSES.has(normalizedStatus)) return 'Cancelled';
   if (normalizedType === 'failed' || FAILED_STATUSES.has(normalizedStatus)) return 'Failed';
   return formatDisplayName(eventType || status, 'Update');
@@ -143,7 +162,9 @@ export function buildDonationHistoryEventData({
   const donorId = donationData.donorId || null;
   const beneficiaryId = donationData.beneficiaryId || donationData.offeredTo || null;
   const volunteerId = donationData.assignedVolunteerId || actor.userId || null;
-  const participantIds = Array.from(new Set([donorId, beneficiaryId, volunteerId].filter(Boolean)));
+  // Ensure the actor is included in participantIds so the authenticated user
+  // performing the action (e.g., beneficiary) is allowed to create history events
+  const participantIds = Array.from(new Set([donorId, beneficiaryId, volunteerId, actor.userId].filter(Boolean)));
   const eventLabel = getEventLabel(eventType, status);
   const searchText = buildSearchText([
     donationId,

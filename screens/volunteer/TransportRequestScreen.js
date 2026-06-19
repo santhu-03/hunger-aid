@@ -39,19 +39,20 @@ export default function TransportRequestScreen() {
     loadToggleState();
   }, [volunteerId]);
 
-  // Load transport requests
+  // Load transport requests from centralized tracking
   useEffect(() => {
     if (!volunteerId) return;
 
     const q = query(
-      collection(db, 'transportRequests'),
+      collection(db, 'deliveryTracking'),
       where('volunteerId', '==', volunteerId),
-      where('status', '==', 'pending')
+      where('currentStatus', '==', 'Volunteer Assigned')
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const requests = snapshot.docs.map(doc => ({
         id: doc.id,
+        donationId: doc.data().donationId || doc.id,
         ...doc.data(),
       }));
       setTransportRequests(requests);
@@ -200,7 +201,7 @@ export default function TransportRequestScreen() {
                   {request.donationDetails?.foodItem || 'Food Donation'}
                 </Text>
                 <Text style={styles.distanceText}>
-                  {request.distance?.toFixed(1) || '0'} km away
+                  {request.etaMinutes ? `${request.etaMinutes} min ETA` : 'New assignment'}
                 </Text>
               </View>
 
@@ -218,12 +219,10 @@ export default function TransportRequestScreen() {
                 </Text>
               </View>
 
-              {request.donationDetails?.quantity && (
+              {request.currentStatus && (
                 <View style={styles.requestDetails}>
-                  <Text style={styles.detailLabel}>Quantity:</Text>
-                  <Text style={styles.detailText}>
-                    {request.donationDetails.quantity}
-                  </Text>
+                  <Text style={styles.detailLabel}>Status:</Text>
+                  <Text style={styles.detailText}>{request.currentStatus}</Text>
                 </View>
               )}
 

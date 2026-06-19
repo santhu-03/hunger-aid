@@ -63,20 +63,11 @@ import { Picker } from '@react-native-picker/picker';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Dimensions, Image, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { BarChart, PieChart } from 'react-native-chart-kit';
+import { getAuth } from 'firebase/auth';
+import { collection, getFirestore, onSnapshot, query, where } from 'firebase/firestore';
 import { useTheme } from './DonorDashboard';
 
-const MOCK_DONATIONS = [
-  { id: '1', amount: 2000, date: '2024-01-15', campaign: 'Education Kits' },
-  { id: '2', amount: 1500, date: '2024-02-10', campaign: 'Flood Relief' },
-  { id: '3', amount: 3000, date: '2024-03-05', campaign: 'Mid-Day Meals' },
-  { id: '4', amount: 1000, date: '2024-04-20', campaign: 'Education Kits' },
-  { id: '5', amount: 2500, date: '2023-11-12', campaign: 'Flood Relief' },
-  { id: '6', amount: 1800, date: '2023-09-18', campaign: 'Mid-Day Meals' },
-  { id: '7', amount: 1200, date: '2023-06-25', campaign: 'Education Kits' },
-  { id: '8', amount: 2200, date: '2023-05-30', campaign: 'Flood Relief' },
-  { id: '9', amount: 1700, date: '2023-03-14', campaign: 'Mid-Day Meals' },
-  { id: '10', amount: 900, date: '2023-01-10', campaign: 'Education Kits' },
-];
+// Removed MOCK_DONATIONS
 
 const chartColors = [
   '#1976d2', '#43a047', '#ff9800', '#e53935', '#8e24aa', '#00897b', '#fbc02d', '#6d4c41'
@@ -102,11 +93,36 @@ export default function DonorReportScreen() {
   });
 
   useEffect(() => {
-    setIsLoading(true);
-    setTimeout(() => {
-      setAllDonations(MOCK_DONATIONS);
+    const auth = getAuth();
+    const uid = auth.currentUser?.uid;
+    if (!uid) {
       setIsLoading(false);
-    }, 1000);
+      return;
+    }
+
+    const db = getFirestore();
+    const q = query(
+      collection(db, 'donations'),
+      where('donorId', '==', uid),
+      where('status', '==', 'completed')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const docs = snapshot.docs.map(doc => {
+        const data = doc.data();
+        const dateObj = data.completedAt?.toDate() || data.createdAt?.toDate() || new Date();
+        return {
+          id: doc.id,
+          amount: parseInt(data.quantity, 10) || 1, // Using quantity as amount
+          date: dateObj.toISOString(),
+          campaign: data.campaign || data.foodItem || 'General Donation',
+        };
+      });
+      setAllDonations(docs);
+      setIsLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
@@ -188,8 +204,8 @@ export default function DonorReportScreen() {
           {/* KPI Cards */}
           <View style={styles.kpiContainer}>
             <View style={styles.kpiCard}>
-              <Text style={styles.kpiValue}>₹{reportData.kpi.totalDonated || 0}</Text>
-              <Text style={styles.kpiLabel}>Total Donated</Text>
+              <Text style={styles.kpiValue}>{reportData.kpi.totalDonated || 0}</Text>
+              <Text style={styles.kpiLabel}>Meals Donated</Text>
             </View>
             <View style={styles.kpiCard}>
               <Text style={styles.kpiValue}>{reportData.kpi.campaignsSupported || 0}</Text>
@@ -207,7 +223,8 @@ export default function DonorReportScreen() {
               data={reportData.barChart}
               width={screenWidth}
               height={220}
-              yAxisLabel="₹"
+              yAxisLabel=""
+              yAxisSuffix=" meals"
               chartConfig={{
                 backgroundColor: '#fff',
                 backgroundGradientFrom: '#fff',

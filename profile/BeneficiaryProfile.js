@@ -4,6 +4,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { doc, getFirestore, updateDoc } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
+import { getLocalUri, needsUpload, storagePaths, uploadImage } from '../services/storageService';
 import { Alert, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 export default function BeneficiaryProfile({ userData, onSave, onClose }) {
@@ -50,6 +51,22 @@ export default function BeneficiaryProfile({ userData, onSave, onClose }) {
     } catch (e) {
       // ignore location error, allow profile update without location
     }
+
+    // Upload profile picture to Firebase Storage if the user picked a new local image
+    let profilePicUrl = typeof profilePic === 'string' ? profilePic : (profilePic?.uri || null);
+    if (needsUpload(profilePic)) {
+      try {
+        profilePicUrl = await uploadImage(
+          getLocalUri(profilePic),
+          storagePaths.profilePic(userData.uid),
+        );
+        setProfilePic(profilePicUrl);
+      } catch (uploadError) {
+        Alert.alert('Upload Failed', `Could not upload profile picture: ${uploadError.message}`);
+        return;
+      }
+    }
+
     if (onSave) {
       onSave({
         name: `${firstName} ${lastName}`,
@@ -63,7 +80,7 @@ export default function BeneficiaryProfile({ userData, onSave, onClose }) {
         newsletter,
         campaignUpdates,
         smsAlerts,
-        profilePic,
+        profilePic: profilePicUrl,
       });
     }
     // Update Firestore users collection with uid, role, location, and address
@@ -79,7 +96,7 @@ export default function BeneficiaryProfile({ userData, onSave, onClose }) {
       if (zip) addressParts.push(zip);
       if (country) addressParts.push(country);
       const fullAddress = addressParts.join(', ');
-      
+
       await updateDoc(userRef, {
         uid: userData.uid,
         role: 'Beneficiary',
@@ -93,6 +110,7 @@ export default function BeneficiaryProfile({ userData, onSave, onClose }) {
         country: country || null,
         address: fullAddress || 'No address provided',
         location: latitude && longitude ? { latitude, longitude } : null,
+        profilePic: profilePicUrl || null,
       });
       console.log('Beneficiary profile updated:', {
         uid: userData.uid,

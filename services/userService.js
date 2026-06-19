@@ -49,7 +49,10 @@ export function listenUser(userId, onChange) {
 }
 
 /**
- * Delete a user document
+ * Delete a user's Firestore document.
+ * SECURITY NOTE: This removes the user's data document but does NOT revoke
+ * their Firebase Authentication account — the user can still sign in until
+ * the Auth account is deleted via the Admin SDK (requires a Cloud Function).
  * @param {string} userId
  */
 export async function deleteUser(userId) {

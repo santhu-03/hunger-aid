@@ -4,6 +4,7 @@ import * as Location from 'expo-location';
 import { doc, getFirestore, updateDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { Alert, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { getLocalUri, needsUpload, storagePaths, uploadImage } from '../services/storageService';
 
 export default function DonorProfile({ userData, onSave, onClose }) {
   // Use userData.profilePic if available, otherwise local state
@@ -51,6 +52,21 @@ export default function DonorProfile({ userData, onSave, onClose }) {
     } catch (e) {
       // ignore location error, allow profile update without location
     }
+    // Upload profile picture to Firebase Storage if the user picked a new local image.
+    let profilePicUrl = typeof profilePic === 'string' ? profilePic : (profilePic?.uri || null);
+    if (needsUpload(profilePic)) {
+      try {
+        profilePicUrl = await uploadImage(
+          getLocalUri(profilePic),
+          storagePaths.profilePic(userData.uid),
+        );
+        setProfilePic(profilePicUrl);
+      } catch (uploadError) {
+        Alert.alert('Upload Failed', `Could not upload profile picture: ${uploadError.message}`);
+        return;
+      }
+    }
+
     if (onSave) {
       onSave({
         name: `${firstName} ${lastName}`,
@@ -64,7 +80,7 @@ export default function DonorProfile({ userData, onSave, onClose }) {
         newsletter,
         campaignUpdates,
         smsAlerts,
-        profilePic, // always pass the latest profilePic
+        profilePic: profilePicUrl,
       });
     }
     // Update Firestore users collection with uid, role, location, and address
@@ -80,7 +96,7 @@ export default function DonorProfile({ userData, onSave, onClose }) {
       if (zip) addressParts.push(zip);
       if (country) addressParts.push(country);
       const fullAddress = addressParts.join(', ');
-      
+
       await updateDoc(userRef, {
         uid: userData.uid,
         role: 'Donor',
@@ -94,6 +110,7 @@ export default function DonorProfile({ userData, onSave, onClose }) {
         country: country || null,
         address: fullAddress || 'No address provided',
         location: latitude && longitude ? { latitude, longitude } : null,
+        profilePic: profilePicUrl || null,
       });
     } catch (e) {
       console.error('Error updating Firestore:', e);

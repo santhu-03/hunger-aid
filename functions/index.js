@@ -133,7 +133,8 @@ exports.onDonationCreate = onDocumentCreated("donations/{donationId}", async (ev
   const beneficiary = beneficiarySnap.data();
   if (beneficiary && beneficiary.fcmToken) {
     const messaging = getMessaging();
-    const payload = {
+    await messaging.send({
+      token: beneficiary.fcmToken,
       notification: {
         title: "New Donation Offer!",
         body: "A donor has posted a donation near you. Please review and accept or decline.",
@@ -142,8 +143,7 @@ exports.onDonationCreate = onDocumentCreated("donations/{donationId}", async (ev
         type: "donation_offer",
         donationId: donationId,
       },
-    };
-    await messaging.sendToDevice(beneficiary.fcmToken, payload);
+    });
   }
   return null;
 });
@@ -156,14 +156,15 @@ exports.onDonationUpdate = onDocumentUpdated("donations/{donationId}", async (ev
   const db = getFirestore();
 
   // Notify donor if beneficiary accepts or declines
-  if (before.status === "Offered" && (after.status === "Accepted" || after.status === "Declined") && after.donorId) {
+  if (before.status === "Offered" && (after.status === "Pending Pickup" || after.status === "Pending") && after.donorId) {
     const donorSnap = await db.doc(`users/${after.donorId}`).get();
     if (donorSnap.exists && donorSnap.data().fcmToken) {
       const messaging = getMessaging();
-      const payload = {
+      await messaging.send({
+        token: donorSnap.data().fcmToken,
         notification: {
-          title: after.status === "Accepted" ? "Donation Accepted!" : "Donation Declined",
-          body: after.status === "Accepted"
+          title: after.status === "Pending Pickup" ? "Donation Accepted!" : "Donation Declined",
+          body: after.status === "Pending Pickup"
             ? "Your donation was accepted by the beneficiary."
             : "Your donation was declined by the beneficiary.",
         },
@@ -172,13 +173,44 @@ exports.onDonationUpdate = onDocumentUpdated("donations/{donationId}", async (ev
           donationId: donationId,
           status: after.status,
         },
-      };
-      await messaging.sendToDevice(donorSnap.data().fcmToken, payload);
+      });
     }
   }
 
+  // Update aggregate impact metrics when a donation reaches a completed state
+  const COMPLETED_STATUSES = ["Completed", "Completed Verified"];
+  const wasCompleted = COMPLETED_STATUSES.includes(before.status);
+  const isNowCompleted = COMPLETED_STATUSES.includes(after.status);
+
+  if (!wasCompleted && isNowCompleted) {
+    const qty = parseInt(after.quantity, 10);
+    const meals = isNaN(qty) ? 1 : qty;
+    const statsRef = db.doc("stats/impactMetrics");
+
+    const statsUpdate = {
+      totalDelivered: FieldValue.increment(1),
+      totalMeals: FieldValue.increment(meals),
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+
+    // Increment activeDonors only on the donor's first ever completed donation
+    if (after.donorId) {
+      const prevSnap = await db.collection("donations")
+        .where("donorId", "==", after.donorId)
+        .where("status", "in", COMPLETED_STATUSES)
+        .limit(2)
+        .get();
+      const isFirstCompletion = prevSnap.docs.filter((d) => d.id !== donationId).length === 0;
+      if (isFirstCompletion) {
+        statsUpdate.activeDonors = FieldValue.increment(1);
+      }
+    }
+
+    await statsRef.set(statsUpdate, { merge: true });
+  }
+
   // Assign volunteer workflow: when beneficiary accepts the donation create / update delivery task
-  if (before.status !== "Accepted" && after.status === "Accepted" && after.beneficiaryId) {
+  if (before.status !== "Pending Pickup" && after.status === "Pending Pickup" && after.beneficiaryId) {
     return createDeliveryTaskForDonation({ db, donationId, donation: after });
   }
   return null;
@@ -216,7 +248,12 @@ exports.onTaskUpdate = onDocumentUpdated("deliveryTasks/{taskId}", async (event)
     }
 
     if (tokensToSend.length > 0) {
-      return messaging.sendToDevice(tokensToSend, payload);
+      return messaging.sendEach(
+        tokensToSend.map((token) => ({
+          token,
+          notification: payload.notification,
+        }))
+      );
     }
   }
 
@@ -501,7 +538,8 @@ async function sendVolunteerNotification(db, volunteerId, donationId) {
   const user = userSnap.data();
   if (!user || !user.fcmToken) return;
   const messaging = getMessaging();
-  const payload = {
+  await messaging.send({
+    token: user.fcmToken,
     notification: {
       title: "New Delivery Task",
       body: "You have been assigned a nearby pickup. Please accept or reject.",
@@ -510,8 +548,7 @@ async function sendVolunteerNotification(db, volunteerId, donationId) {
       type: "delivery_task",
       donationId,
     },
-  };
-  await messaging.sendToDevice(user.fcmToken, payload);
+  });
 }
 
 async function notifyAdminNoVolunteer(db, donationId, message) {
@@ -522,6 +559,420 @@ async function notifyAdminNoVolunteer(db, donationId, message) {
     createdAt: FieldValue.serverTimestamp(),
   });
 }
+
+// Delivery status → push notification message map
+const DELIVERY_STATUS_MESSAGES = {
+  "Volunteer Assigned":              "A volunteer has been assigned for your delivery!",
+  "En Route to Donor":               "Your volunteer is on the way to pick up the food.",
+  "Food Picked Up":                  "The food has been picked up and is on its way!",
+  "Out For Delivery":                "Your food is out for delivery!",
+  "Arriving Soon":                   "The volunteer is arriving soon!",
+  "Delivered Pending Verification":  "The volunteer has arrived. Please verify delivery with your OTP.",
+  "Completed Verified":              "Delivery completed and verified. Thank you!",
+  "Failed":                          "Delivery could not be completed. Please contact support.",
+  "Cancelled":                       "This delivery has been cancelled.",
+};
+
+// 1.4. onDeliveryTrackingUpdate — push notifications on delivery status changes
+exports.onDeliveryTrackingUpdate = onDocumentUpdated("deliveryTracking/{donationId}", async (event) => {
+  const before = event.data.before.data();
+  const after  = event.data.after.data();
+
+  const prevStatus = before.currentStatus;
+  const newStatus  = after.currentStatus;
+
+  // Only act when the status actually changed
+  if (!newStatus || newStatus === prevStatus) return null;
+
+  const body = DELIVERY_STATUS_MESSAGES[newStatus];
+  if (!body) return null; // No push for unmapped statuses
+
+  const db = getFirestore();
+  const donationId = event.params.donationId;
+
+  // Resolve donor and beneficiary tokens
+  const recipientIds = [after.donorId, after.beneficiaryId].filter(Boolean);
+  if (recipientIds.length === 0) return null;
+
+  const userSnaps = await Promise.all(
+    recipientIds.map((uid) => db.doc(`users/${uid}`).get())
+  );
+
+  const messages = userSnaps
+    .filter((snap) => snap.exists && snap.data().fcmToken)
+    .map((snap) => ({
+      token: snap.data().fcmToken,
+      notification: {
+        title: `Delivery Update: ${newStatus}`,
+        body,
+      },
+      data: {
+        type: "delivery_status",
+        donationId,
+        status: newStatus,
+      },
+    }));
+
+  if (messages.length === 0) return null;
+
+  const messaging = getMessaging();
+  await messaging.sendEach(messages);
+  return null;
+});
+
+// ── Live tracking: staleness cleanup ─────────────────────────────────────────
+//
+// Every 5 minutes: mark liveTracking sessions as 'paused' if not updated for
+// > 4 minutes, and 'ended' if their donation is in a terminal state.
+
+exports.cleanupStaleTracking = onSchedule("every 5 minutes", async () => {
+  const db = getFirestore();
+  const TERMINAL = ["Completed", "Completed Verified", "Failed", "Cancelled"];
+  const staleMs  = 4 * 60 * 1000;
+
+  const snap = await db.collection("liveTracking").where("status", "==", "active").get();
+
+  for (const doc of snap.docs) {
+    try {
+      const data = doc.data();
+      const lastUpdate = data.lastUpdateAt?.toMillis?.() ?? 0;
+
+      if (Date.now() - lastUpdate > staleMs) {
+        // Check if donation is terminal
+        if (data.deliveryId) {
+          const donSnap = await db.doc(`donations/${data.deliveryId}`).get();
+          if (donSnap.exists && TERMINAL.includes(donSnap.data().status)) {
+            await doc.ref.update({
+              status:       "ended",
+              lastUpdateAt: FieldValue.serverTimestamp(),
+            });
+            continue;
+          }
+        }
+        await doc.ref.update({
+          status:       "paused",
+          lastUpdateAt: FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (e) {
+      console.warn("[cleanupStaleTracking] error for", doc.id, e.message);
+    }
+  }
+});
+
+// ── Live tracking: on-update notification trigger ────────────────────────────
+//
+// When a volunteer's live position updates and they are close to the
+// pickup/drop geofence, send an approach notification.
+// (Complements the geofence client-side engine — server-side fallback.)
+
+exports.onLiveTrackingUpdate = onDocumentUpdated("liveTracking/{donationId}", async (event) => {
+  const before = event.data.before.data();
+  const after  = event.data.after.data();
+  const donationId = event.params.donationId;
+
+  if (after.status !== "active") return null;
+  if (!after.latitude || !after.longitude) return null;
+
+  const db = getFirestore();
+  const donSnap = await db.doc(`donations/${donationId}`).get();
+  if (!donSnap.exists) return null;
+  const donation = donSnap.data();
+
+  // Only send "approaching" notification once per session (guard with a flag)
+  const APPROACH_RADIUS_KM = 0.3;
+
+  async function sendApproachNotification(recipientId, title, body) {
+    const userSnap = await db.doc(`users/${recipientId}`).get();
+    if (!userSnap.exists) return;
+    const user = userSnap.data();
+
+    // In-app notification
+    await db.collection("notifications").add({
+      userId: recipientId, type: "volunteer_approaching",
+      title, message: body, donationId,
+      read: false, createdAt: FieldValue.serverTimestamp(),
+    });
+
+    // Push
+    if (user.fcmToken) {
+      const messaging = getMessaging();
+      await messaging.send({
+        token: user.fcmToken,
+        notification: { title, body },
+        data: { type: "volunteer_approaching", donationId },
+      }).catch((e) => console.warn("[onLiveTrackingUpdate] FCM:", e.message));
+    }
+  }
+
+  // Check approach to pickup (for donor)
+  if (donation.donorId && donation.location?.latitude) {
+    const d = getDistanceKm(after.latitude, after.longitude,
+      donation.location.latitude, donation.location.longitude);
+    const wasFar = !before.latitude ||
+      getDistanceKm(before.latitude, before.longitude,
+        donation.location.latitude, donation.location.longitude) > APPROACH_RADIUS_KM;
+    if (d <= APPROACH_RADIUS_KM && wasFar) {
+      await sendApproachNotification(donation.donorId,
+        "🚗 Volunteer Approaching!", "Your volunteer is within 300m of the pickup location.");
+    }
+  }
+
+  // Check approach to drop (for beneficiary)
+  const beneficiaryId = donation.beneficiaryId || donation.offeredTo;
+  if (beneficiaryId) {
+    const benefSnap = await db.doc(`users/${beneficiaryId}`).get();
+    if (benefSnap.exists) {
+      const benef = benefSnap.data();
+      if (benef.location?.latitude) {
+        const d = getDistanceKm(after.latitude, after.longitude,
+          benef.location.latitude, benef.location.longitude);
+        const wasFar = !before.latitude ||
+          getDistanceKm(before.latitude, before.longitude,
+            benef.location.latitude, benef.location.longitude) > APPROACH_RADIUS_KM;
+        if (d <= APPROACH_RADIUS_KM && wasFar) {
+          await sendApproachNotification(beneficiaryId,
+            "📦 Delivery Arriving!", "Your food delivery is within 300m — please be ready!");
+        }
+      }
+    }
+  }
+
+  return null;
+});
+
+// ── Admin: get all active tracking sessions ───────────────────────────────────
+
+exports.getAllActiveSessions = onRequest(async (req, res) => {
+  const authCtx = await verifyAuth(req, res);
+  if (!authCtx) return;
+
+  const db = getFirestore();
+  const callerSnap = await db.doc(`users/${authCtx.uid}`).get();
+  if (!callerSnap.exists || !(callerSnap.data().role || "").match(/^admin$/i)) {
+    return res.status(403).json({ error: "Admin only" });
+  }
+
+  try {
+    const snap = await db.collection("liveTracking")
+      .where("status", "==", "active").get();
+
+    const sessions = await Promise.all(snap.docs.map(async (d) => {
+      const data = d.data();
+      let volunteerName = null;
+      if (data.volunteerId) {
+        const vSnap = await db.doc(`users/${data.volunteerId}`).get();
+        if (vSnap.exists) volunteerName = vSnap.data().name || null;
+      }
+      return {
+        donationId:    d.id,
+        volunteerId:   data.volunteerId,
+        volunteerName,
+        latitude:      data.latitude,
+        longitude:     data.longitude,
+        speed:         data.speed,
+        heading:       data.heading,
+        lastUpdateAt:  data.lastUpdateAt,
+        status:        data.status,
+      };
+    }));
+
+    res.status(200).json({ sessions, count: sessions.length });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── Tracking history: replay data for admin ───────────────────────────────────
+
+exports.getTrackingReplay = onRequest(async (req, res) => {
+  const authCtx = await verifyAuth(req, res);
+  if (!authCtx) return;
+
+  const db = getFirestore();
+  const { donationId } = req.query;
+  if (!donationId) return res.status(400).json({ error: "Missing donationId" });
+
+  const callerSnap = await db.doc(`users/${authCtx.uid}`).get();
+  const callerRole = (callerSnap.exists ? callerSnap.data().role : "").toLowerCase();
+  const isAdmin = callerRole === "admin";
+  const donSnap = await db.doc(`donations/${donationId}`).get();
+  const isParticipant = donSnap.exists && (
+    donSnap.data().donorId === authCtx.uid ||
+    donSnap.data().beneficiaryId === authCtx.uid ||
+    donSnap.data().assignedVolunteerId === authCtx.uid
+  );
+
+  if (!isAdmin && !isParticipant) {
+    return res.status(403).json({ error: "Not authorized" });
+  }
+
+  try {
+    const histSnap = await db.doc(`trackingHistory/${donationId}`).get();
+    if (!histSnap.exists) return res.status(404).json({ error: "No history found" });
+    res.status(200).json(histSnap.data());
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── Geofence event handler ────────────────────────────────────────────────────
+//
+// Triggered whenever a new document is written to geofenceEvents.
+// Sends push notifications and writes in-app notifications for donor /
+// beneficiary depending on the event type.
+
+exports.onGeofenceEvent = onDocumentCreated("geofenceEvents/{eventId}", async (event) => {
+  const snap = event.data;
+  if (!snap) return null;
+  const data = snap.data();
+  if (!data || data.processed) return null;
+
+  const { donationId, volunteerId, type } = data;
+  if (!donationId || !volunteerId) return null;
+
+  const db = getFirestore();
+  const messaging = getMessaging();
+
+  // Mark processed immediately to prevent duplicate handling
+  await snap.ref.update({ processed: true, processedAt: FieldValue.serverTimestamp() });
+
+  // Resolve donation participants
+  const donSnap = await db.doc(`donations/${donationId}`).get();
+  if (!donSnap.exists) return null;
+  const donation = donSnap.data();
+
+  const isPickup = type === 'pickup_arrival';
+  const isDrop   = type === 'drop_arrival';
+  if (!isPickup && !isDrop) return null; // Only handle arrival events
+
+  const recipientId = isPickup
+    ? donation.donorId
+    : (donation.beneficiaryId || donation.offeredTo);
+  if (!recipientId) return null;
+
+  // Resolve FCM token
+  const recipientSnap = await db.doc(`users/${recipientId}`).get();
+  if (!recipientSnap.exists) return null;
+  const recipient = recipientSnap.data();
+
+  const title = isPickup ? "🚗 Volunteer Arrived at Pickup" : "📦 Volunteer is Nearby!";
+  const body  = isPickup
+    ? "Your volunteer has arrived at the pickup location and will collect the food shortly."
+    : "Your volunteer is almost there — please be ready to receive your food donation!";
+
+  // Push notification
+  if (recipient.fcmToken) {
+    try {
+      await messaging.send({
+        token: recipient.fcmToken,
+        notification: { title, body },
+        data: { type: "geofence_arrival", donationId, eventType: type },
+      });
+    } catch (fcmErr) {
+      console.warn("[onGeofenceEvent] FCM send failed:", fcmErr.message);
+    }
+  }
+
+  // In-app notification
+  await db.collection("notifications").add({
+    userId:     recipientId,
+    type:       isPickup ? "volunteer_arrived_pickup" : "volunteer_arrived_drop",
+    title,
+    message:    body,
+    donationId,
+    read:       false,
+    createdAt:  FieldValue.serverTimestamp(),
+  });
+
+  return null;
+});
+
+// ── Admin live tracking HTTP endpoint ────────────────────────────────────────
+//
+// Returns all active geofences + latest volunteer positions for the admin map.
+
+exports.getActiveGeofences = onRequest(async (req, res) => {
+  const authCtx = await verifyAuth(req, res);
+  if (!authCtx) return;
+
+  const db = getFirestore();
+
+  // Verify caller is admin
+  const callerSnap = await db.doc(`users/${authCtx.uid}`).get();
+  if (!callerSnap.exists || !(callerSnap.data().role || "").match(/^admin$/i)) {
+    return res.status(403).json({ error: "Admin only" });
+  }
+
+  try {
+    const activeSnap = await db
+      .collection("geofences")
+      .where("status", "==", "active")
+      .get();
+
+    const geofences = await Promise.all(
+      activeSnap.docs.map(async (gDoc) => {
+        const g = gDoc.data();
+        // Fetch volunteer's latest location
+        let volunteerLocation = null;
+        if (g.volunteerId) {
+          const vSnap = await db.doc(`users/${g.volunteerId}`).get();
+          if (vSnap.exists) {
+            volunteerLocation = vSnap.data().location || null;
+          }
+        }
+        return {
+          donationId:      gDoc.id,
+          volunteerId:     g.volunteerId,
+          pickupLocation:  g.pickupLocation,
+          dropLocation:    g.dropLocation,
+          pickupRadius:    g.pickupRadius,
+          dropRadius:      g.dropRadius,
+          status:          g.status,
+          volunteerLocation,
+          pickupTriggeredAt: g.pickupTriggeredAt,
+          dropTriggeredAt:   g.dropTriggeredAt,
+        };
+      })
+    );
+
+    res.status(200).json({ geofences });
+  } catch (err) {
+    console.error("[getActiveGeofences] Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── Geofence staleness cleanup ────────────────────────────────────────────────
+//
+// Runs every hour. Marks geofences as cancelled if their donation is terminal
+// and they were not already completed.
+
+exports.cleanupStaleGeofences = onSchedule("every 60 minutes", async () => {
+  const db = getFirestore();
+  const TERMINAL = ["Completed", "Completed Verified", "Failed", "Cancelled"];
+
+  const activeSnap = await db
+    .collection("geofences")
+    .where("status", "==", "active")
+    .get();
+
+  for (const gDoc of activeSnap.docs) {
+    try {
+      const donationSnap = await db.doc(`donations/${gDoc.id}`).get();
+      if (!donationSnap.exists) {
+        await gDoc.ref.update({ status: "cancelled", updatedAt: FieldValue.serverTimestamp() });
+        continue;
+      }
+      const dStatus = donationSnap.data().status;
+      if (TERMINAL.includes(dStatus)) {
+        await gDoc.ref.update({ status: "cancelled", updatedAt: FieldValue.serverTimestamp() });
+      }
+    } catch (e) {
+      console.warn("[cleanupStaleGeofences] error for", gDoc.id, e.message);
+    }
+  }
+});
 
 async function verifyAuth(req, res) {
   const header = req.headers.authorization || "";

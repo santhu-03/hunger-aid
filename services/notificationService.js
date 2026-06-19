@@ -1,4 +1,4 @@
-import { collection, doc, getDocs, getFirestore, onSnapshot, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
+import { collection, doc, getDocs, getFirestore, onSnapshot, orderBy, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import { Alert } from 'react-native';
 import { app } from '../firebaseConfig';
 
@@ -9,15 +9,18 @@ const db = getFirestore(app);
  * Task notification types
  */
 export const NOTIFICATION_TYPES = {
-  DONATION_CREATED: 'donation_created',
+  DONATION_CREATED:  'donation_created',
   DONATION_ACCEPTED: 'donation_accepted',
-  VOLUNTEER_ASSIGNED: 'volunteer_assigned',
+  VOLUNTEER_ASSIGNED:'volunteer_assigned',
   TRANSPORT_REQUEST: 'transport_request',
   DELIVERY_ACCEPTED: 'delivery_accepted',
   DELIVERY_REJECTED: 'delivery_rejected',
-  DELIVERY_COMPLETED: 'delivery_completed',
-  LOCATION_UPDATED: 'location_updated',
+  DELIVERY_COMPLETED:'delivery_completed',
+  LOCATION_UPDATED:  'location_updated',
   DONATION_RECEIVED: 'donation_received',
+  CHAT_MESSAGE:      'chat_message',
+  BADGE_EARNED:      'badge_earned',
+  GEOFENCE_ARRIVED:  'geofence_arrived',
 };
 
 /**
@@ -54,14 +57,36 @@ export async function createNotification(recipientData, type, title, message, re
         ...recipientData,
         ...relatedData,
       };
+
+      // Normalize: ensure userId is set so listenToUserNotifications query matches.
+      // Prefer an explicit userId; fall back to the first role-specific ID present.
+      if (!notificationData.userId) {
+        notificationData.userId =
+          notificationData.donorId ||
+          notificationData.volunteerId ||
+          notificationData.beneficiaryId ||
+          null;
+      }
     }
 
     // Validate at least one recipient field is present
-    const hasRecipient = notificationData.userId || notificationData.donorId || 
+    const hasRecipient = notificationData.userId || notificationData.donorId ||
                          notificationData.volunteerId || notificationData.beneficiaryId;
-    
+
     if (!hasRecipient) {
       console.error('❌ Cannot create notification: no recipient identified');
+      return;
+    }
+
+    // Firestore rule requires userId is string — abort cleanly if it's still null/falsy
+    if (typeof notificationData.userId !== 'string' || !notificationData.userId) {
+      console.error('❌ Cannot create notification: userId is not a valid string after normalization');
+      return;
+    }
+
+    // Firestore rule requires type is string
+    if (typeof notificationData.type !== 'string' || !notificationData.type) {
+      console.error('❌ Cannot create notification: type is not a valid string');
       return;
     }
 
@@ -100,7 +125,8 @@ export function listenToUserNotifications(userId, callback) {
 
     const q = query(
       collection(db, 'notifications'),
-      where('userId', '==', userId)
+      where('userId', '==', userId),
+      orderBy('createdAt', 'desc')
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -108,14 +134,6 @@ export function listenToUserNotifications(userId, callback) {
         id: doc.id,
         ...doc.data(),
       }));
-      
-      // Sort by creation time (newest first)
-      notifications.sort((a, b) => {
-        const aTime = a.createdAt?.toMillis?.() || 0;
-        const bTime = b.createdAt?.toMillis?.() || 0;
-        return bTime - aTime;
-      });
-
       callback(notifications);
     });
 
@@ -261,6 +279,41 @@ export async function notifyDeliveryCompleted(donorId, beneficiaryId, foodItem) 
   );
 }
 
+/**
+ * Notify donor and beneficiary of a status transition
+ */
+export async function notifyDeliveryStatusTransition(donorId, beneficiaryId, status, foodItem = 'donation') {
+  if (!donorId && !beneficiaryId) return;
+  
+  const title = `Delivery Update: ${status}`;
+  let message = `The delivery status for your ${foodItem} is now: ${status}`;
+  
+  if (status === 'Volunteer Assigned') {
+    message = `A volunteer has been assigned for your ${foodItem}!`;
+  } else if (status === 'En Route to Donor' || status === 'Pickup started') {
+    message = `Volunteer is on the way to pick up the ${foodItem}.`;
+  } else if (status === 'Food Picked Up') {
+    message = `The ${foodItem} has been picked up by the volunteer.`;
+  } else if (status === 'Out For Delivery') {
+    message = `The ${foodItem} is out for delivery!`;
+  } else if (status === 'Arriving Soon') {
+    message = `The volunteer is arriving soon with the ${foodItem}!`;
+  } else if (status === 'Delivered Pending Verification') {
+    message = `The volunteer has arrived. Please provide the OTP to verify delivery of ${foodItem}.`;
+  } else if (status === 'Completed Verified' || status === 'Delivery verified') {
+    message = `Delivery of ${foodItem} was successfully verified!`;
+  }
+
+  // Notify donor
+  if (donorId) {
+    await createNotification({ userId: donorId }, NOTIFICATION_TYPES.LOCATION_UPDATED, title, message, { foodItem, status });
+  }
+  // Notify beneficiary
+  if (beneficiaryId) {
+    await createNotification({ userId: beneficiaryId }, NOTIFICATION_TYPES.LOCATION_UPDATED, title, message, { foodItem, status });
+  }
+}
+
 // ===== VOLUNTEER LOCATION NOTIFICATIONS =====
 
 /**
@@ -273,6 +326,40 @@ export async function notifyLocationUpdated(volunteerId) {
     '📍 Location Updated',
     'Your location has been set. You are now available for transport requests!',
     {}
+  );
+}
+
+// ===== CHAT NOTIFICATIONS =====
+
+/**
+ * Notify all chat participants (except the sender) of a new message.
+ * participantIds: all uids in the chat; senderId is excluded.
+ */
+export async function notifyChatMessage(participantIds, senderId, senderName, chatId, preview) {
+  const recipients = (participantIds || []).filter((uid) => uid && uid !== senderId);
+  await Promise.all(
+    recipients.map((userId) =>
+      createNotification(
+        userId,
+        NOTIFICATION_TYPES.CHAT_MESSAGE,
+        `💬 New message from ${senderName}`,
+        preview ? preview.slice(0, 80) : 'You have a new message',
+        { chatId, senderId, senderName }
+      )
+    )
+  );
+}
+
+/**
+ * Notify a volunteer that they earned a badge.
+ */
+export async function notifyBadgeEarned(volunteerId, badgeLabel) {
+  await createNotification(
+    volunteerId,
+    NOTIFICATION_TYPES.BADGE_EARNED,
+    '🏅 New Badge Earned!',
+    `You earned the "${badgeLabel}" badge. Keep it up!`,
+    { badgeLabel }
   );
 }
 
@@ -322,9 +409,9 @@ export async function markAllAsRead(userId) {
     );
 
     const snapshot = await getDocs(q);
-    snapshot.forEach(async (doc) => {
-      await setDoc(doc.ref, { read: true }, { merge: true });
-    });
+    await Promise.all(
+      snapshot.docs.map((d) => setDoc(d.ref, { read: true }, { merge: true }))
+    );
 
     console.log(`✅ All notifications marked as read for user ${userId}`);
   } catch (error) {

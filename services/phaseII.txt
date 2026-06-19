@@ -1,0 +1,565 @@
+HUNGER AID — PHASE II TECHNICAL REPORT
+
+Project: Hunger Aid — Surplus Food Management Application
+Repository path: HungerAid/ (report compiled from source files in repository)
+
+NOTE TO READER
+This document describes the actual implementation details discovered in the codebase. All references to files and functions describe the real source found in the repository (e.g., `services/volunteerAssignmentService.js`, `functions/index.js`, `app/DonationScreen.js`, `firebaseConfig.js`). Where a feature is partially implemented, that is explicitly noted.
+
+1. PROJECT OVERVIEW
+
+1.1 Purpose
+The Hunger Aid application is a mobile-first surplus-food management system built using Expo/React Native on the frontend and Firebase (Firestore, Auth, Cloud Functions, FCM) on the backend. The system enables donors to post surplus food, beneficiaries to accept donations, and volunteers to transport donated food items. The codebase implements a full lifecycle from donation creation through volunteer assignment to delivery tracking and verification.
+
+1.2 Real-world problem solved
+The application aims to reduce food waste by enabling individuals and organizations to offer surplus edible food to nearby beneficiaries. The system automates matching donors to near beneficiaries and assigns volunteers for transport, providing real-time tracking and notification flows to reduce manual coordination.
+
+1.3 Main objectives
+- Provide an intuitive donor flow for posting donations with location and photo.
+- Allow beneficiaries to accept offers and trigger delivery workflows.
+- Maintain volunteer assignment logic with nearest-first matching and transactional safety.
+- Provide delivery tracking with timeline events, status transitions, and verification.
+- Provide notifications (in-app and FCM) for critical events.
+
+1.4 Scope
+The Phase-II codebase demonstrates an integrated mobile app with Firebase services handling authentication, data storage, transactions, notifications, and scheduled reassignment. The project focuses on functionality rather than on extensive UI polish or multi-tenant deployment.
+
+1.5 Key Phase-II innovations (as implemented)
+- Transactional volunteer assignment using Firestore transactions to avoid race conditions (`services/volunteerAssignmentService.js`).
+- Centralized delivery tracking document with timeline events and verification fields (`services/deliveryTrackingService.js`).
+- Server-side Cloud Function assignment and scheduled reassigner (`functions/index.js`) providing resilience to volunteer timeouts.
+- Rich notification design stored in Firestore and sent via FCM from Cloud Functions and client-side helper functions (`services/notificationService.js`, `functions/index.js`).
+
+2. COMPLETE FEATURE EXTRACTION (IMPLEMENTED)
+
+For each feature below the purpose, how it works, technologies used, frontend & backend flows, database interactions and user interaction flow are provided.
+
+2.1 Authentication
+- Purpose: Authenticate users (donors, beneficiaries, volunteers, admins) and allow authenticated operations.
+- How it works: Firebase Authentication (client SDK). `firebaseConfig.js` initializes `getAuth()` to be used in screens and services. The code relies on `auth.currentUser` to determine identities when performing writes (e.g., donation creation in `app/DonationScreen.js`, acceptance in `services/donationAcceptanceService.js`).
+- Technologies used: Firebase Auth (client), firebase-admin Auth in Cloud Functions (`functions/index.js` uses `getAuth()` to verify ID tokens for HTTP endpoints).
+- Frontend flow: Users sign in using Expo/React Native flows (not fully present in repo, but screens call `getAuth()` and expect `currentUser`). Protected UI actions check for signed-in user and show Alerts if missing.
+- Backend flow: Cloud Functions verify incoming `Bearer` tokens with `getAuth().verifyIdToken(token)` in `functions/index.js` helper `verifyAuth` for HTTP endpoints `acceptDeliveryTask`, `rejectDeliveryTask`.
+- Database interaction: Auth provides uid used in `users` collection and other documents (donations, notification recipient fields).
+- User interaction: When trying to post or accept donations, the UI checks `currentUser` and aborts with an alert if not signed in.
+
+2.2 Role management
+- Purpose: Differentiate capabilities of `donor`, `beneficiary`, `volunteer`, and `admin`.
+- How it works: `users` documents contain a `role` string. Code checks role when filtering candidates (e.g., volunteers filtered in `volunteerAssignmentService.findAllAvailableVolunteers`). Admin-specific functionality appears in `app/AdminDashboard.js` where `useRecoveryEngine()` is used.
+- Technologies: Firestore `users` collection.
+- Frontend flow: Role-specific screens exist under `app/` (e.g., `DonorDashboard.js`, `BeneficiaryDashboard.js`, `VolunteerDashboard.js`, `AdminDashboard.js`); UI components conditionally present actions based on `userData.role`.
+- Backend flow: Cloud Functions filter by `role` (e.g., `functions/index.js` `getNearestBeneficiaries` queries `users` where `role == "Beneficiary"`).
+- DB interaction: role field stored on `users/{uid}`.
+
+2.3 Donation management
+- Purpose: Create, offer, accept, update and complete donation entities.
+- How it works: Donor posts donation from `app/DonationScreen.js` which creates a Firestore document in `donations` collection via a transaction, and appends a donation history event. Cloud Functions `onDonationCreate` and `onDonationUpdate` respond to create/update events to trigger offers and assign volunteers.
+- Technologies: Firestore, Cloud Functions, Firestore transactions.
+- Frontend flow: `DonationScreen` collects `foodItem`, `foodType`, `timePrepared`, `quantity`, `photoUri`, and `location` then writes to `donations` with `createdAtIso` and an `offerExpiry` timestamp.
+- Backend flow: Cloud Function `onDonationCreate` chooses the nearest beneficiary and updates the donation with `status: 'Offered'` and `offeredTo`. If beneficiary accepts, `services/donationAcceptanceService.handleDonationAcceptance` and `functions/index.js:onDonationUpdate` create delivery tasks and trigger assignment.
+- DB interaction: `donations/{donationId}` contains fields: donorId, donorName, beneficiaryId/offeredTo, beneficiaryName, foodItem, foodType, quantity, photoUri, location ({latitude,longitude} or coords), status (Offered/Accepted/etc.), offerExpiry, createdAtIso, updatedAt, assignedVolunteerId, rejectedBy, rejectedAt, volunteerAcceptedAt, waitingForVolunteerAt.
+
+2.4 Volunteer assignment (core)
+- Purpose: Pick an available volunteer (nearest, available) and assign them to a donation, handling rejections and fallbacks.
+- How it works: Primary logic in `services/volunteerAssignmentService.js` (`findAllAvailableVolunteers`, `assignNearestVolunteer`, `rejectDelivery`, `acceptDelivery`). The service:
+  - Queries `users` collection for volunteers (prefers `transportAvailability==true`, falls back to `role=='volunteer'`).
+  - Filters client-side for status != blocked, availability != busy, transportActive != false.
+  - Calculates distances with Haversine implementation in `utils/haversineDistance.js` and sorts by distance.
+  - Uses Firestore `runTransaction` to atomically update `donations/{id}`, `users/{volunteerId}` and to create delivery tracking and donation history events using `appendDeliveryTrackingEvent` and `appendDonationHistoryEvent`.
+- Technologies: Firestore transactions, Haversine distance utility, serverTimestamp.
+- Frontend flow: When beneficiary accepts, frontend calls `handleDonationAcceptance` which invokes `assignNearestVolunteer`. Volunteer acceptance/rejection flows are handled via `acceptDelivery` and `rejectDelivery` in the service.
+- Backend/Cloud Functions: There is an alternate server-side flow in `functions/index.js` that creates `deliveryTasks` and assigns the first volunteer with a scheduled reassigner; both approaches coexist (client-side assignment and server task-based assignment).
+- DB interaction: writes `assignedVolunteerId` to `donations`, sets volunteer doc fields `availability`, `assignedDonationId`, `transportAvailability`, writes `deliveryTracking/{donationId}`, and adds events to `donationHistoryEvents` collection.
+
+2.5 Beneficiary workflow
+- Purpose: Allow beneficiaries to accept presented donations and provide pickup/drop info.
+- Implementation: Beneficiary acceptance occurs in `services/donationAcceptanceService.handleDonationAcceptance` which sets the donation `status` to `accepted_by_beneficiary`, writes tracking event `Pending Pickup`, and attempts to find/assign volunteers.
+- Frontend flow: Beneficiary uses `BDonationScreen.js` and `BeneficiaryDashboard` screens to view offers and accept.
+- DB interaction: `donations` updated with `beneficiaryId`, `acceptedAt`; `deliveryTracking` receives initial timeline events and metadata; `donationHistoryEvent` appended.
+
+2.6 Notifications (in-app + FCM)
+- Purpose: Inform users (donors, beneficiaries, volunteers) about events like offers, acceptance, assignment, rejections, completion.
+- How it works: Two-layered approach:
+  1. In-app persisted notifications stored under `notifications` collection via `services/notificationService.createNotification`. Clients can `listenToUserNotifications(userId)` for real-time updates.
+  2. Push notifications through Firebase Cloud Messaging (FCM) sent by Cloud Functions `functions/index.js` when triggers occur (e.g., `onDonationCreate` sends FCM to beneficiary if `fcmToken` exists; `createDeliveryTaskForDonation` calls `sendVolunteerNotification`).
+- Technologies: Firestore `notifications` collection, Cloud Functions `admin.messaging()`, client Alert popups for immediate user feedback (`showNotificationPopup`).
+- DB interaction: `notifications/{notificationId}` fields: userId/donorId/beneficiaryId/volunteerId, type (from `NOTIFICATION_TYPES`), title, message, createdAt, read flag.
+
+2.7 Real-time updates
+- Purpose: Provide near-instant UI updates for notifications, delivery tracking and user lists.
+- How it works: Client uses Firestore onSnapshot listeners (`listenToUserNotifications`, `userService.listenUser`, `userService.listenAllUsers`, and various `onSnapshot` calls inside app screens such as `BDonationScreen.js` which uses `onSnapshot` for donations). `services/notificationService.listenToUserNotifications` sets up a query by `userId` and returns an unsubscribe.
+- Technologies: Firestore real-time listeners (onSnapshot).
+
+2.8 Admin controls
+- Purpose: Administrative oversight and recovery operations.
+- How it works: Admin UI (`app/AdminDashboard.js`) calls recovery utility `useRecoveryEngine()` (a hook implemented in codebase) that performs global recovery sweeps when admin logs in. Admin can view and update user roles/status via `services/userService.js` functions (`updateUserRole`, `updateUserStatus`).
+
+2.9 Delivery tracking
+- Purpose: Record timeline events for deliveries and drive status transitions and notifications.
+- How it works: `services/deliveryTrackingService.appendDeliveryTrackingEvent` is the canonical method for appending events atomically via a transaction. It stores `deliveryTracking/{donationId}` documents with fields: currentStatus, updatedAt, timelineEvents (arrayUnion of events), pickupLocation, dropLocation, etaMinutes, verification (otp, qrToken, verified boolean).
+- Technologies: Firestore `deliveryTracking` collection, arrayUnion, serverTimestamp.
+
+2.10 Location tracking and Maps integration
+- Purpose: Use latitude/longitude to find nearest beneficiaries and volunteers, show maps and markers, and compute distances.
+- How it works: Frontend uses Expo `Location` and MapView component (`components/MapComponents.js` and `app/DonationScreen.js`). Distances are computed using a Haversine function (`utils/haversineDistance.js`). Server-side nearest beneficiary selection in `functions/index.js` also uses the Haversine algorithm.
+
+2.11 Dashboard features and Analytics
+- Purpose: Provide role-specific dashboard screens (Donor, Beneficiary, Volunteer, Admin) and aggregated metrics.
+- Implementation: Dashboards exist as UI components in `app/` directory. Donation history summarization is provided by `services/donationHistoryService.summarizeDonationHistory` which returns counts for total donations, successful deliveries, meals served.
+
+2.12 Firebase integration and API design
+- Firebase features used:
+  - Firestore (primary DB) for collections: `users`, `donations`, `deliveryTracking`, `donationHistoryEvents` (constant `DONATION_HISTORY_COLLECTION`), `notifications`, `deliveryTasks` (created by Cloud Functions), `notifications`.
+  - Firebase Auth for identity.
+  - Firebase Admin SDK in Cloud Functions for server-side operations: `admin.auth()`, `admin.firestore()`, `admin.messaging()`.
+  - Cloud Functions triggers: onDocumentCreated, onDocumentUpdated, onSchedule; HTTP functions for accept/reject endpoints.
+
+2.13 Socket connections
+- Not used. Real-time interactions rely on Firestore onSnapshot listeners and Cloud Functions + FCM for push.
+
+2.14 Database operations, error handling, validation
+- Database patterns: use of `runTransaction` for critical multi-document updates, `transaction.set(..., {merge:true})` in tracking, and `appendDonationHistoryEvent(transaction, db, ...)` for event logging.
+- Validation: Functions perform explicit field checks (e.g., `onDonationCreate` validates location coordinates). Client-side validation uses alerts (e.g., `DonationScreen.handleSubmit` checks fields before writing.)
+
+2.15 Session handling & state management
+- Frontend state is managed via React `useState` and custom hooks (e.g., `useRecoveryEngine`, `useDonationHistory`). No global Redux/Context is enforced across all screens (some hooks implement localized shared logic).
+
+2.16 Offline handling
+- Partial: UI hints and local image selection work offline; however, Firestore writes are not explicitly queued in the app code beyond what Firestore provides offline persistence (not explicitly configured in repo). So offline write resilience is partially dependent on Firestore client defaults.
+
+2.17 Image upload & file storage
+- Partial: `DonationScreen` collects `photoUri` and stores the URI on the `donations` document as `photoUri`. There is no implementation in the repository that uploads images to Firebase Storage — this is a partial implementation where URIs (local) are attached to documents but no server-side or storage upload code exists.
+
+2.18 Push notifications
+- Implemented via FCM tokens stored under `users` (field `fcmToken`), Cloud Functions use `getMessaging().sendToDevice` to send push messages. Client helper functions also store notifications in `notifications` collection and display local popups.
+
+2.19 Filtering/search
+- Implemented in `donationHistoryService.buildSearchText` which builds search tokens for history events. Some queries use equality filters (`where('role','==','Beneficiary')`). No full-text search index is present beyond generated `searchText` fields.
+
+2.20 Status management
+- Delivery status enumerations live in `deliveryTrackingService.DELIVERY_STATUSES`. Donations have `status` strings used by both client and Cloud Functions to drive logic transitions.
+
+3. COMPLETE USER ROLE ANALYSIS
+
+3.1 Donor workflow
+- Login flow: Uses Firebase Auth; donor UID used for writes. `DonationScreen` requires `auth.currentUser`.
+- Permissions: Allowed to create donations, view history, receive notifications. Security rules not included in repo, but client code expects server-side rules to validate operations.
+- Screens: `DonationScreen.js`, `DonorDashboard.js`, `donorhistory.js`, `donorsettings.js`, `DonorReport.js`.
+- Actions: Create donation, upload photo (local), pick beneficiary by proximity, view donation status.
+- DB access: writes to `donations`, reads to `users` (beneficiaries) and `donationHistoryEvents`.
+- Notifications: Receives `donation_accepted`, `delivery_accepted`, `delivery_completed` notifications.
+- Restrictions: Client applies validation; server functions validate data shapes and rely on authenticated user id.
+- Real-time interactions: onSnapshot for notifications and donation updates.
+
+3.2 Beneficiary workflow
+- Login flow: Firebase Auth.
+- Permissions: Accept/decline donations offered to them, view assigned donations.
+- Screens: `BDonationScreen.js`, `BeneficiaryDashboard.js`.
+- Actions: Accept donation triggering volunteer assignment, provide pickup/drop details.
+- DB access: updates to `donations` (status, beneficiaryId), creation of `deliveryTracking` via `appendDeliveryTrackingEvent`.
+- Notifications: Receives donation offers (Cloud Function push) and delivery status updates.
+- Real-time interactions: onSnapshot to track offers and tracking updates.
+
+3.3 Volunteer workflow
+- Login flow: Firebase Auth.
+- Permissions: Accept/reject delivery tasks, toggle availability fields (`transportAvailability`, `transportActive`).
+- Screens: `VolunteerDashboard.js` and transport-specific UI.
+- Actions: Accept delivery (`services/volunteerAssignmentService.acceptDelivery`) which updates `donations` and `users` documents and appends delivery history/tracking events. Reject delivery triggers `rejectDelivery` which attempts reassignments.
+- DB access: `users/{uid}` updates (availability, assignedDonationId), interacts with `donations/{id}` and `deliveryTracking/{id}`.
+- Notifications: Receives `TRANSPORT_REQUEST` and related events via `notifyVolunteerAssigned` and FCM.
+- Real-time interactions: Cloud Functions for assignments, client onSnapshot for assigned donation changes.
+
+3.4 Admin workflow
+- Login flow: Firebase Auth and role field `admin` in `users`.
+- Permissions: Use recovery engine `useRecoveryEngine()` and UI in `AdminDashboard.js` for administrative tasks; can update user role/status via `userService.updateUserRole` and `userService.updateUserStatus`.
+- Screens: `AdminDashboard.js`.
+- Actions: Admin can trigger recovery sweeps, view action items, manage users.
+- DB access: Full view of collections via admin-privileged Cloud Functions or direct console access (client code reads all `users` via listener but production would require secure rules).
+
+4. FRONTEND ARCHITECTURE ANALYSIS
+
+4.1 Folder structure (relevant)
+- `app/` — main screens: `DonationScreen.js`, `BDonationScreen.js`, `AdminDashboard.js`, dashboard screens for roles.
+- `components/` — shared UI components: `MapComponents.js`, `MapComponents.web.js`, `FoodQualityResultCard.js`.
+- `services/` — client-side business logic and wrappers for Firestore and notifications (e.g., `volunteerAssignmentService.js`, `notificationService.js`, `userService.js`).
+- `hooks/` — custom hooks: `useRecoveryEngine.js`, `useDonationHistory.js`, various `use*` hooks.
+- `utils/` — `haversineDistance.js`, `distanceCalculator.js`.
+- `functions/` — Cloud Functions code (server-side).
+
+4.2 Component hierarchy
+- Top-level navigators (not fully shown) route to role-specific dashboards which contain nested components (cards, lists, maps). `DonationScreen` uses `MapView` (`components/MapComponents`) and custom modals.
+
+4.3 Navigation system
+- The repo assumes React Navigation (common in Expo) though explicit navigator code not included in snippets. Screens export default functions for registration.
+
+4.4 State management
+- Local state with `useState`. Shared behavior via hooks in `hooks/`. Firestore onSnapshot listeners provide reactive state.
+
+4.5 Hooks used
+- `useRecoveryEngine()` (runs recovery sweep for admin), `useFoodQualityAssessment()`, `useDonationHistory()` — domain-specific hooks encapsulate logic and side-effects.
+
+4.6 Reusable components
+- `MapComponents.js` abstracts MapView usage and Marker components for both web and mobile.
+
+4.7 UI workflow, form handling & validation
+- Forms use controlled inputs and `Alert` for validation feedback. Example: `DonationScreen.handleSubmit` validates required fields and uses Firestore transaction to create donation.
+
+4.8 Styling architecture
+- Inline styles via `StyleSheet.create` in each screen. Color system centralized in `constants/theme.ts`.
+
+4.9 Responsive & animation handling
+- Map components and modals use platform-aware props; animation is minimal and relies on native Modal behavior.
+
+5. BACKEND ARCHITECTURE ANALYSIS
+
+5.1 Backend structure
+- Two server-side facets:
+  1. Cloud Functions in `functions/index.js` which implement Firestore triggers, scheduled jobs, and HTTP endpoints.
+  2. Lightweight Express server in `backend/server.js` for health checks (not core to features).
+
+5.2 API logic (Cloud Functions)
+- HTTP endpoints in Cloud Functions:
+  - `getNearestBeneficiaries` — returns beneficiaries sorted by distance for a given `latitude` and `longitude` (used by clients optionally).
+  - `testHttpFunction` — simple endpoint for health-testing.
+  - `acceptDeliveryTask` — HTTP POST endpoint for volunteers to accept tasks (verifies auth token, uses transaction to mark task accepted).
+  - `rejectDeliveryTask` — HTTP POST endpoint for volunteers to reject tasks (verifies auth, updates task and triggers reassignment).
+  - `createDonation` — helper HTTP endpoint to create donation documents (used for testing).
+
+5.3 Cloud Functions triggers
+- `onDonationCreate` — picks nearest beneficiary, updates donation with `offeredTo` and `offerExpiry`, and sends FCM to beneficiary if `fcmToken` exists.
+- `onDonationUpdate` — reacts to status transitions from `Offered` to `Accepted` to create delivery tasks and notify donor.
+- `onTaskUpdate` — handles volunteer acceptance/rejection and triggers reassignment when necessary.
+- `reassignTimedOutTasks` (scheduler) — runs every minute to find `deliveryTasks` with `status == Offered` and expired `offerExpiry` to reassign.
+
+5.4 Authentication flow on server
+- `verifyAuth(req, res)` validates `Bearer` token with `admin.auth().verifyIdToken` in Cloud Functions.
+
+5.5 Firestore collections used (summary)
+- `users` — user profiles (role, location, fcmToken, availability, transportAvailability, transportActive, assignedDonationId, status, name, contact)
+- `donations` — donor-submitted donations (fields described earlier)
+- `donationHistoryEvents` — chronological events for donations (created by `appendDonationHistoryEvent`)
+- `deliveryTracking` — per-donation tracking with `timelineEvents` (arrayUnion)
+- `deliveryTasks` — task-based assignment queue used by server functions
+- `notifications` — persisted in-app notification records
+
+5.6 Security rules
+- Not present in repository. Cloud Functions include server-side checks (e.g., only proceed when `beneficiaryId` exists), but Firestore security rules expected in production are not included in the codebase and must be added before public deployment.
+
+5.7 Data validation
+- Cloud Functions and services contain explicit checks (e.g., location presence, role filters). Client performs input validation and shows `Alert` if invalid.
+
+5.8 Real-time listeners and notification triggers
+- Client uses `onSnapshot`. Cloud Functions trigger FCM sends on document create/update and schedule tasks.
+
+5.9 Async workflows & error management
+- Uses `async/await` heavily. Critical multi-document operations use `runTransaction`. Error handling includes try/catch blocks that log full objects and rethrow where appropriate (e.g., `volunteerAssignmentService` logs `error.code` and `error.message`).
+
+6. DATABASE DESIGN EXTRACTION (SCHEMA)
+
+6.1 Firestore collections and typical document fields
+
+- `users/{uid}`
+  - name: string
+  - role: 'donor' | 'beneficiary' | 'volunteer' | 'admin'
+  - location: { latitude: number, longitude: number }
+  - address: string
+  - contact: string
+  - fcmToken: string (optional)
+  - availability: 'available'|'busy'|'inactive'|...
+  - transportAvailability: boolean
+  - transportActive: boolean (explicit online flag)
+  - assignedDonationId: string|null
+  - status: 'active'|'inactive'|'blocked'
+  - createdAt, updatedAt timestamps
+
+- `donations/{donationId}`
+  - donorId, donorName
+  - beneficiaryId or offeredTo
+  - beneficiaryName
+  - foodItem, foodType, quantity
+  - photoUri (local URI stored — no Storage upload in repo)
+  - location: { latitude, longitude }
+  - pickupAddress (optional), dropoffAddress
+  - status: 'Offered'|'Accepted'|'Assigned'|'Completed'|'Failed'|... (strings handled in code)
+  - offerExpiry: Timestamp
+  - assignedVolunteerId
+  - rejectedBy, rejectedAt
+  - volunteerAcceptedAt
+  - createdAtIso (string), createdAt, updatedAt timestamps
+
+- `deliveryTracking/{donationId}`
+  - donationId
+  - donorId, beneficiaryId, volunteerId
+  - currentStatus
+  - timelineEvents: array of {status, timestamp, actor, notes}
+  - pickupLocation, dropLocation, volunteerLocation
+  - etaMinutes
+  - verification: { otp, qrToken, verified, verifiedAt }
+  - currentAssignedVolunteer, lastComputedCandidates, rejectedVolunteerIds
+
+- `donationHistoryEvents/{eventId}` (constant `donationHistoryEvents`)
+  - donationId, eventType, eventLabel, status, lifecycleState
+  - donorId/donorName, beneficiaryId/beneficiaryName, volunteerId/volunteerName
+  - actorId, actorName, actorRole
+  - foodItem, quantity
+  - participantIds
+  - searchText (tokenized)
+  - eventDateKey, createdAtIso, eventSequenceRank
+
+- `deliveryTasks/{taskId}` (server-generated task representation)
+  - donationId, donorId, beneficiaryId
+  - pickupLocation, dropoffLocation
+  - candidateQueue: [{id, distanceKm}]
+  - currentVolunteerId, currentCandidateIndex
+  - rejectedVolunteers
+  - status: 'Offered'|'Accepted'|'Rejected'|'Unassigned'
+  - offerExpiry
+
+- `notifications/{notificationId}`
+  - userId/donorId/beneficiaryId/volunteerId
+  - type (from NOTIFICATION_TYPES), title, message
+  - read: boolean
+  - createdAt
+
+6.2 Relationships and foreign references
+- `donations` reference `users` via donorId, beneficiaryId, assignedVolunteerId.
+- `deliveryTracking` keyed by donationId references the donation and participant ids.
+- `donationHistoryEvents` reference donationId and participant ids to enable permission checks and search.
+
+6.3 CRUD operations summary
+- Create: donors create `donations` (transaction), Cloud Functions create `deliveryTasks`.
+- Read: clients read `users`, `donations`, `deliveryTracking`, `notifications` via queries/onSnapshot.
+- Update: assignment writes update `donations` and `users` via transactions to set `assignedVolunteerId` and `assignedDonationId`.
+- Delete: `userService.deleteUser` exists; donation deletion not prominent.
+
+6.4 Indexing
+- No explicit Firestore composite indexes are present in repository. Queries use single-field filters (role equality, userId equality). For complex queries, code avoids requiring composite indexes by performing client-side filtering (e.g., `volunteerAssignmentService` filters candidates client-side after an indexable query).
+
+6.5 ER Diagram explanation (textual)
+- Entities: User, Donation, DeliveryTracking, DonationHistoryEvent, DeliveryTask, Notification.
+- Relations: User (donor) 1..N -> Donation; Donation 1..1 -> DeliveryTracking; Donation 1..N -> DonationHistoryEvent; DeliveryTask references Donation and candidate Users.
+
+7. APPLICATION WORKFLOW ANALYSIS (STEP-BY-STEP)
+
+7.1 Donation lifecycle
+1. Donor fills `DonationScreen` and submits.
+2. Client validates input and writes `donations/{id}` within a `runTransaction`, sets `createdAtIso` and appends an `offered` history event.
+3. Cloud Function `onDonationCreate` triggers; it finds nearest beneficiary and updates `donation` with `status: Offered` and `offeredTo`, sets `offerExpiry` and sends FCM to beneficiary.
+4. Beneficiary receives an offer (FCM + `notifications` document) and may accept in-app.
+5. Acceptance sets donation status `accepted_by_beneficiary` (via `donationAcceptanceService`) and creates `deliveryTracking` 'Pending Pickup'.
+6. System attempts volunteer assignment (client-side `assignNearestVolunteer` service and/or server-side function `createDeliveryTaskForDonation`).
+7. Volunteer accepts (via task accept or client accept call) — `assignedVolunteerId` set and tracking events appended.
+8. Volunteer picks up and delivers; timeline events updated until verification and `Completed` status.
+
+7.2 Volunteer assignment lifecycle
+- Candidate discovery -> candidate queue creation -> transactional assignment -> volunteer acceptance -> if rejected, try next candidate -> if none left, mark donation as waiting/unassigned.
+
+7.3 Notification lifecycle
+- Events (offer, accept, assign, reject, complete) cause `createNotification` writes and, where available, FCM pushes from Cloud Functions.
+
+7.4 Delivery & status transition lifecycle
+- Statuses follow `deliveryTrackingService.DELIVERY_STATUSES`. Each transition uses `appendDeliveryTrackingEvent` and may trigger `notifyDeliveryStatusTransition` to create notifications.
+
+8. REAL-TIME FUNCTIONALITY ANALYSIS
+
+8.1 Firestore listeners
+- Clients use `onSnapshot` for notifications and user/donation state updates (e.g., `services/notificationService.listenToUserNotifications`, `userService.listenUser`).
+
+8.2 Live synchronization
+- Firestore ensures near real-time sync. Timeline events use `arrayUnion` to safely append events from multiple sources.
+
+8.3 Notification updates
+- `createNotification` writes to `notifications` and client listeners fetch and reorder by `createdAt`.
+
+8.4 Event-driven architecture
+- Cloud Functions (onCreate/onUpdate) and scheduled functions implement server-side event-driven reassignment and push notifications.
+
+9. SECURITY ANALYSIS
+
+9.1 Authentication security
+- Uses Firebase Auth (client) and verifies ID tokens in Cloud Functions `verifyAuth`.
+
+9.2 Authorization and Role-based access
+- Role-based logic enforced in application code (e.g., filtering volunteers by `role=='volunteer'`). Firestore security rules to enforce RBAC are NOT included in repo — required for production.
+
+9.3 Protected routes
+- Cloud Functions verify tokens for HTTP accept/reject endpoints. Frontend prevents unauthenticated actions by checking `auth.currentUser`.
+
+9.4 Input validation
+- Cloud Functions validate required fields (locations), clients validate form fields; additional server-side validation is present but incomplete in some HTTP endpoints.
+
+9.5 Data privacy & session management
+- No session storage beyond Firebase Auth state. Personal data kept in Firestore; production requires secure rules and GDPR-like practices.
+
+10. CODE IMPLEMENTATION DETAILS (CRITICAL FILES & LOGIC)
+
+10.1 Important files
+- `services/volunteerAssignmentService.js` — candidate discovery, distance calculation, transactional assignment, accept/reject workflows.
+- `services/deliveryTrackingService.js` — canonical tracking append API and status list.
+- `services/donationHistoryService.js` — event building, ranking and summarization.
+- `services/notificationService.js` — create persisted notifications and client-side listeners.
+- `services/donationAcceptanceService.js` — beneficiary acceptance orchestration.
+- `functions/index.js` — Cloud Functions triggers, HTTP endpoints, scheduled reassigner and helper assignment algorithms.
+- `app/DonationScreen.js` — donor UI, validation, local photo handling, beneficiary selection logic.
+
+10.2 Critical logic & core algorithms
+- Nearest-neighbour selection uses Haversine formula in `utils/haversineDistance.js` and is used both client-side and server-side.
+- Transactional assignment uses Firestore `runTransaction` to atomically update donation, volunteer, tracking and history docs, preventing double assignment races.
+
+10.3 Assignment logic
+- Candidate selection with fallback: query volunteers with `transportAvailability==true`, fallback to `role=='volunteer'`. Filter out blocked/busy/offline. Sort by computed distance.
+- Transactional claim: ensure donation is still unassigned and volunteer still available, then update both documents and append tracking/history.
+
+10.4 Notification logic
+- `createNotification` writes to `notifications` collection. Cloud Functions call `messaging.sendToDevice` using stored `fcmToken` fields for push delivery.
+
+10.5 State synchronization and asynchronous operations
+- Uses onSnapshot for client realtime; transactions for atomic changes; scheduled reassigner to handle offer TTLs.
+
+11. API & SERVICE ANALYSIS
+
+11.1 API list (Cloud Functions and backend)
+- `getNearestBeneficiaries` (HTTP query latitude, longitude) — returns sorted beneficiaries (functions/index.js).
+- `testHttpFunction` — test endpoint.
+- `acceptDeliveryTask` (POST) — accepts a task (verify token required).
+- `rejectDeliveryTask` (POST) — rejects a task and triggers reassignment.
+- `createDonation` (HTTP) — testing endpoint for creating donations.
+
+11.2 Request/Response examples
+- `GET /getNearestBeneficiaries?latitude=...&longitude=...` -> { beneficiaries: [ {id,name,address,location,distance}, ... ] }
+- `POST /acceptDeliveryTask` body { taskId } with `Authorization: Bearer <idToken>` -> { ok: true }
+
+11.3 External & Expo integrations
+- Uses Expo ImagePicker and Location APIs in `app/DonationScreen.js`.
+- Uses `@react-native-community/datetimepicker`.
+
+11.4 Push notification services
+- Firebase Cloud Messaging via Admin SDK in Cloud Functions.
+
+12. TESTING & VALIDATION
+
+12.1 Existing validations
+- Client-side required field validations in `DonationScreen.handleSubmit`.
+- Server-side data shape checks (e.g., `onDonationCreate` checks location types).
+
+12.2 Error handling patterns
+- try/catch blocks with rich `console.error` logs. Transactions rethrow errors for client handling.
+
+12.3 Edge cases handled
+- Volunteers missing location: `findAllAvailableVolunteers` skips volunteers without location and logs warnings.
+- No volunteers found: donation is marked waiting via `markAsWaitingForVolunteer`.
+- Volunteer rejection: `rejectDelivery` tries to reassign, and if none remain marks tracking as Failed.
+
+12.4 Testing opportunities
+- Unit tests for: Haversine distance, `getEventLabel`, `getLifecycleState`, transaction flows.
+- Integration tests: Cloud Functions triggers for `onDonationCreate` and scheduled `reassignTimedOutTasks`.
+
+13. PERFORMANCE ANALYSIS
+
+13.1 Scalability
+- Current queries fetch all volunteers or beneficiaries with equality filters and then client-side filter & compute distances — this will not scale to very large user bases without geospatial indexing or external geo-query services. Server-side code also performs full-collection scans.
+
+13.2 Real-time performance
+- Firestore real-time listeners scale well; however heavy writes to arrays (arrayUnion) and high-frequency timeline events might create hotspots for very active donations.
+
+13.3 Optimization suggestions
+- Use geohashing/GeoFirestore for location queries to reduce scanned documents.
+- Add composite indexes for common filters.
+
+14. DEPLOYMENT & CONFIGURATION
+
+14.1 Environment setup
+- `firebaseConfig.js` reads Expo env variables `EXPO_PUBLIC_FIREBASE_*`. `.env` file present with keys in repository.
+
+14.2 Firebase setup
+- Requires Firebase project `hungeraid-60fb6` (env present). Cloud Functions use Admin SDK; deploy functions with `firebase deploy --only functions`.
+
+14.3 Expo setup
+- App is an Expo project. Dependencies include Expo packages and React Native community libraries.
+
+14.4 Build configuration & dependencies
+- `package.json` in root and `functions/package.json` for Cloud Functions. Functions target Node 18+ recommended for firebase v2 functions.
+
+14.5 Hosting/Deployment
+- Mobile app distributed via typical Expo methods. Cloud Functions require Firebase project and credentials; ensure `GOOGLE_APPLICATION_CREDENTIALS` when testing locally.
+
+15. SCREEN-BY-SCREEN ANALYSIS (REPRESENTATIVE)
+
+15.1 DonationScreen.js
+- Purpose: donor posts donation.
+- Inputs: foodItem, foodType, date/time prepared, quantity, photo, location, selected beneficiary.
+- Outputs: `donations/{id}` document, donation history event.
+- Navigation: returns to donor dashboard on success.
+- APIs called: Firestore transaction via `getFirestore(app)`, `appendDonationHistoryEvent` service.
+- DB ops: create donation doc, append donation history event.
+
+15.2 BDonationScreen.js (Beneficiary donation screen)
+- Purpose: beneficiary views and accepts offered donations.
+- Inputs: pickup/drop locations when accepting.
+- APIs: `handleDonationAcceptance` calls `assignNearestVolunteer` and notifies volunteers.
+
+15.3 AdminDashboard.js
+- Purpose: admin operations and recovery engine.
+
+15.4 NotificationScreen.js
+- Purpose: show persisted `notifications` (listening via `listenToUserNotifications`).
+
+More screens: DonorDashboard, VolunteerDashboard, FoodQualityScreen (food quality checks via photo), TrackDonor.
+
+16. PHASE-II ENHANCEMENTS (COMPARATIVE)
+
+16.1 New vs basic systems
+- Transactional volunteer assignment with fallbacks, server scheduler to reassign timed-out offers, structured delivery tracking with verification fields and event history.
+
+16.2 Advanced functionality
+- Scheduled background reassigner (`reassignTimedOutTasks`) and robust `reassignTaskToNextVolunteer` logic.
+
+16.3 Scalability & automation
+- Candidate queue architecture in `deliveryTasks` enables automated, non-blocking assignment and reassignment.
+
+17. REPORT-READY CONTENT (CHAPTER SNIPPETS)
+
+17.1 Implementation chapter (excerpt)
+Implementation integrates React Native (Expo) client and Firebase backend. The client uses Expo Location, ImagePicker and MapView components to capture location and images. Critical operations are carried out using Firestore transactions to guarantee atomicity. Cloud Functions react to donation lifecycle events to orchestrate offers and volunteer assignment with scheduled reassigners to mitigate timeouts.
+
+17.2 System design chapter (excerpt)
+The system is event-driven: donor events create Firestore documents; triggers in Cloud Functions and client-side services orchestrate matching, assignment, notification and tracking. The design ensures safety using transactions for multi-document updates.
+
+17.3 Testing chapter (excerpt)
+Test cases should include: successful donation creation and assignment, volunteer rejection and successful reassignment, timed-out offers leading to scheduler reassignments, and notification delivery paths.
+
+17.4 Results & discussion (excerpt)
+The implemented system demonstrates reliable transactional assignment and end-to-end workflows, but requires production hardening (security rules, geospatial indexing, storage upload flows for photos).
+
+18. TECHNICAL SUMMARY
+
+18.1 Stack
+- Frontend: Expo/React Native, React, MapView, Expo Location, Expo ImagePicker
+- Backend: Firebase Firestore, Firebase Auth, Firebase Cloud Functions (v2), Firebase Admin SDK, Firebase Cloud Messaging
+- Language: JavaScript
+
+18.2 Architecture summary
+- Mobile client (Expo) <-> Firestore (real-time) + Cloud Functions (server-side orchestrator) + FCM (push). Transactions and scheduled server jobs handle assignment and reassignments.
+
+18.3 Achievements & innovations
+- Robust transactional volunteer assignment, delivery tracking timelines, server scheduler for timed offers, persisted in-app notifications and hybrid client/server assignment paths.
+
+CONCLUSIONS & RECOMMENDATIONS
+- The codebase implements a well-structured Phase-II application with strong domain logic for donation lifecycle and volunteer assignment. For production readiness implement the following:
+  1. Firestore security rules enforcing role-based access and field validation.
+  2. Image upload to Firebase Storage and saving stable download URLs rather than local URIs.
+  3. Geospatial indexing (GeoFirestore or geohash) to avoid full-collection scans for location-based queries.
+  4. Unit and integration tests for Cloud Functions (emulator) and client logic.
+  5. Add monitoring, error reporting, and cost controls for frequent scheduled functions and array growth in timeline arrays.
+
+Appendix: Key code pointers (files)
+- `firebaseConfig.js` — Firebase initialization
+- `functions/index.js` — Cloud Functions (assignment, scheduler, HTTP endpoints)
+- `services/volunteerAssignmentService.js` — client-side assignment transaction logic
+- `services/deliveryTrackingService.js` — canonical tracking API
+- `services/donationHistoryService.js` — history event builder & summarizer
+- `services/notificationService.js` — create/listen/persist notifications
+- `app/DonationScreen.js` — donor form and submission logic
+- `services/userService.js` — user listeners and modification helpers
+
+End of Phase-II technical report.

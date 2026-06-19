@@ -1,21 +1,26 @@
 import { FontAwesome5, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { useNavigation } from '@react-navigation/native';
 import { getAuth } from 'firebase/auth';
-import { collection, doc, getFirestore, onSnapshot, query, where } from 'firebase/firestore';
-import React, { useEffect, useState } from 'react';
-import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { collection, doc, getFirestore, limit, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
+import React, { useEffect, useRef, useState } from 'react';
+import { Alert, Dimensions, Image, Modal, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { app } from '../firebaseConfig'; // adjust path as needed
 import BeneficiaryProfile from '../profile/BeneficiaryProfile';
 import BDonationScreen from './BDonationScreen';
+import ChatListScreen from './ChatListScreen';
 import FoodQualityScreen from './FoodQualityScreen';
+import NotificationsScreen from './NotificationsScreen';
 import { usePosts } from '../hooks/usePosts';
 import { useImpactMetrics } from '../hooks/useImpactMetrics';
+import { useDeliveryTracking } from '../hooks/useDeliveryTracking';
+import LiveTrackingScreen from '../screens/tracking/LiveTrackingScreen';
+import { BarChart } from 'react-native-chart-kit';
 
 const beneficiaryMenuOptions = [
   { icon: "home", label: "Home" },
   { icon: "user", label: "Profile" },
   { icon: "clipboard-list", label: "My Aid Status" },
+  { icon: "map-marked-alt", label: "Track My Delivery" },
   { icon: "book", label: "Resource Hub" },
   { icon: "calendar-alt", label: "Events & Workshops" },
   { icon: "envelope", label: "Inbox / Messages" },
@@ -24,10 +29,482 @@ const beneficiaryMenuOptions = [
   { icon: "camera", label: "Food Quality Check" },
 ];
 
+// ─── OTP Alert Banner ─────────────────────────────────────────────────────────
+// Shown when the volunteer resends OTP or when the initial OTP notification arrives.
+
+function OTPAlertBanner({ notification, onDismiss }) {
+  const otp      = notification?.otpCode || '';
+  const isResend = notification?.isResend === true;
+
+  const [secsLeft, setSecsLeft] = useState(() => {
+    if (!notification?.createdAt) return 600;
+    const createdMs = notification.createdAt.toMillis
+      ? notification.createdAt.toMillis()
+      : Date.now();
+    return Math.max(0, Math.floor((600000 - (Date.now() - createdMs)) / 1000));
+  });
+
+  useEffect(() => {
+    if (secsLeft <= 0) return;
+    const id = setInterval(() => setSecsLeft((s) => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const mm = String(Math.floor(secsLeft / 60)).padStart(2, '0');
+  const ss = String(secsLeft % 60).padStart(2, '0');
+
+  return (
+    <View style={otpBannerStyles.container}>
+      <View style={otpBannerStyles.headerRow}>
+        <View style={otpBannerStyles.iconBg}>
+          <FontAwesome5 name="key" size={12} color="#9c27b0" />
+        </View>
+        <Text style={otpBannerStyles.title}>
+          {isResend ? 'Updated Delivery OTP' : 'Delivery Verification OTP'}
+        </Text>
+        <TouchableOpacity onPress={onDismiss} style={otpBannerStyles.closeBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <MaterialIcons name="close" size={16} color="rgba(255,255,255,0.5)" />
+        </TouchableOpacity>
+      </View>
+
+      <Text style={otpBannerStyles.instruction}>Show this code to the volunteer:</Text>
+
+      <View style={otpBannerStyles.otpRow}>
+        {otp.split('').map((digit, i) => (
+          <View key={i} style={otpBannerStyles.otpDigit}>
+            <Text style={otpBannerStyles.otpDigitText}>{digit}</Text>
+          </View>
+        ))}
+      </View>
+
+      {secsLeft > 0 ? (
+        <Text style={[otpBannerStyles.timerText, secsLeft < 60 && { color: '#f44336' }]}>
+          Expires in {mm}:{ss}
+        </Text>
+      ) : (
+        <Text style={[otpBannerStyles.timerText, { color: '#f44336' }]}>
+          OTP expired — ask the volunteer to resend
+        </Text>
+      )}
+    </View>
+  );
+}
+
+const otpBannerStyles = StyleSheet.create({
+  container: {
+    position: 'absolute',
+    top: (Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 44) + 64,
+    left: 16,
+    right: 16,
+    zIndex: 999,
+    backgroundColor: 'rgba(14,10,30,0.97)',
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1.5,
+    borderColor: 'rgba(156,39,176,0.4)',
+    elevation: 16,
+    shadowColor: '#9c27b0',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  iconBg: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    backgroundColor: 'rgba(156,39,176,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  title: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  closeBtn: {
+    padding: 2,
+  },
+  instruction: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 12,
+    marginBottom: 12,
+  },
+  otpRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 12,
+  },
+  otpDigit: {
+    width: 52,
+    height: 60,
+    borderRadius: 12,
+    backgroundColor: 'rgba(156,39,176,0.15)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(156,39,176,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  otpDigitText: {
+    color: '#ce93d8',
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  timerText: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+});
+
+// ── BeneficiaryTrackingView: finds the active delivery and shows LiveTrackingScreen
+
+function BeneficiaryTrackingView({ userData, onBack }) {
+  const [activeDonationId, setActiveDonationId] = React.useState(null);
+  const [trackingData, setTrackingData] = React.useState(null);
+  const [checked, setChecked] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!userData?.uid) { setChecked(true); return; }
+    const { getFirestore: _getFs, collection: _col, query: _q, where: _w, onSnapshot: _ons } = require('firebase/firestore');
+    const db = _getFs();
+    const ACTIVE = ['Volunteer Assigned', 'En Route to Donor', 'Arrived at Pickup',
+      'Food Picked Up', 'Out For Delivery', 'Arriving Soon', 'Delivered Pending Verification'];
+    // Single-field query (no composite index needed); filter active status client-side.
+    const q = _q(_col(db, 'deliveryTracking'), _w('beneficiaryId', '==', userData.uid));
+    const unsub = _ons(q, (snap) => {
+      const activeDoc = snap.docs.find(d => ACTIVE.includes(d.data().currentStatus));
+      if (activeDoc) {
+        const d = activeDoc.data();
+        setActiveDonationId(d.donationId || activeDoc.id);
+        setTrackingData(d);
+      } else {
+        setActiveDonationId(null);
+        setTrackingData(null);
+      }
+      setChecked(true);
+    }, (err) => {
+      console.warn('[BeneficiaryTrackingView] deliveryTracking query error:', err.message);
+      setChecked(true);
+    });
+    return () => unsub();
+  }, [userData?.uid]);
+
+  if (!checked) {
+    const { ActivityIndicator: AI, View: V } = require('react-native');
+    return <V style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}><AI /></V>;
+  }
+
+  if (activeDonationId && trackingData) {
+    const pickupLoc = trackingData.pickupLocation
+      ? { latitude: trackingData.pickupLocation.lat ?? trackingData.pickupLocation.latitude,
+          longitude: trackingData.pickupLocation.lng ?? trackingData.pickupLocation.longitude }
+      : null;
+    const dropLoc = trackingData.dropLocation
+      ? { latitude: trackingData.dropLocation.lat ?? trackingData.dropLocation.latitude,
+          longitude: trackingData.dropLocation.lng ?? trackingData.dropLocation.longitude }
+      : null;
+    return (
+      <LiveTrackingScreen
+        donationId={activeDonationId}
+        role="beneficiary"
+        deliveryStatus={trackingData.currentStatus}
+        pickupLocation={pickupLoc}
+        dropLocation={dropLoc}
+        onBack={onBack}
+      />
+    );
+  }
+
+  const { View: V, Text: T, TouchableOpacity: TP, StyleSheet: SS } = require('react-native');
+  return (
+    <V style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 16 }}>
+      <T style={{ fontSize: 20, fontWeight: '700', color: '#333', textAlign: 'center' }}>
+        No Active Delivery
+      </T>
+      <T style={{ color: '#888', textAlign: 'center', lineHeight: 22 }}>
+        Live tracking will appear here once a volunteer is assigned and on the way.
+      </T>
+      <TP onPress={onBack} style={{ backgroundColor: '#2e7d32', borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12 }}>
+        <T style={{ color: '#fff', fontWeight: '700' }}>Go Back</T>
+      </TP>
+    </V>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+function useBenStats(uid) {
+  const [stats, setStats] = useState({ received: 0, pending: 0, inTransit: 0, declined: 0 });
+  const [weeklyData, setWeeklyData] = useState([0, 0, 0, 0, 0, 0, 0]);
+  useEffect(() => {
+    if (!uid) return;
+    const db = getFirestore();
+    const q = query(collection(db, 'donations'), where('offeredTo', '==', uid));
+    return onSnapshot(q, snap => {
+      const donations = snap.docs.map(d => d.data());
+      const received = donations.filter(d => ['Completed', 'Completed Verified'].includes(d.status)).length;
+      const pending = donations.filter(d => ['Offered', 'Pending'].includes(d.status)).length;
+      const inTransit = donations.filter(d => ['Volunteer Assigned', 'En Route to Donor', 'Arrived at Pickup', 'Food Picked Up', 'Out For Delivery', 'Arriving Soon', 'Delivered Pending Verification'].includes(d.status)).length;
+      const declined = donations.filter(d => d.status === 'Declined').length;
+      const today = Date.now();
+      const wd = Array(7).fill(0);
+      donations.forEach(d => {
+        const ts = d.createdAt?.toMillis?.();
+        if (!ts) return;
+        const daysAgo = Math.floor((today - ts) / 86400000);
+        if (daysAgo >= 0 && daysAgo < 7) wd[6 - daysAgo]++;
+      });
+      setStats({ received, pending, inTransit, declined });
+      setWeeklyData(wd);
+    }, () => {});
+  }, [uid]);
+  return { stats, weeklyData };
+}
+
+function BKpiPill({ icon, label, value, color }) {
+  return (
+    <View style={{ flex: 1, alignItems: 'center', backgroundColor: color + '18', borderRadius: 14, padding: 12, gap: 4, minWidth: 70 }}>
+      <FontAwesome5 name={icon} size={18} color={color} />
+      <Text style={{ fontSize: 20, fontWeight: '800', color }}>{value ?? 0}</Text>
+      <Text style={{ fontSize: 10, color: '#555', fontWeight: '600', textAlign: 'center' }}>{label}</Text>
+    </View>
+  );
+}
+
+const benChartConfig = {
+  backgroundGradientFrom: '#fff',
+  backgroundGradientTo: '#fff',
+  color: (opacity = 1) => `rgba(46, 125, 50, ${opacity})`,
+  labelColor: () => '#666',
+  barPercentage: 0.55,
+  decimalPlaces: 0,
+  propsForBackgroundLines: { strokeDasharray: '', strokeWidth: 0.5, stroke: '#eee' },
+};
+
+function BenResourceHub({ onClose }) {
+  const resources = [
+    { icon: 'apple-alt', title: 'Nutrition Guide', desc: 'Learn about balanced diet and nutrition for you and your family.', color: '#2e7d32' },
+    { icon: 'hospital', title: 'Health Services', desc: 'Free health camps and government healthcare programs near you.', color: '#1565c0' },
+    { icon: 'graduation-cap', title: 'Education Support', desc: 'Scholarships, free coaching, and school programs available.', color: '#6a1b9a' },
+    { icon: 'home', title: 'Shelter Programs', desc: 'Government shelter and housing assistance programs.', color: '#e65100' },
+    { icon: 'briefcase', title: 'Skill Development', desc: 'Free vocational training and job placement programs.', color: '#00695c' },
+    { icon: 'hands-helping', title: 'NGO Directory', desc: 'Find local NGOs and welfare organizations that can help.', color: '#4527a0' },
+    { icon: 'child', title: 'Child Welfare', desc: 'Child development, mid-day meal programs, and anganwadi info.', color: '#ad1457' },
+    { icon: 'seedling', title: 'Govt. Food Schemes', desc: 'PDS ration cards, Antyodaya, and PM Garib Kalyan Yojana.', color: '#558b2f' },
+  ];
+  return (
+    <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 18 }}>
+        <TouchableOpacity onPress={onClose} style={{ marginRight: 12, padding: 6 }}>
+          <FontAwesome5 name="arrow-left" size={18} color="#2e7d32" />
+        </TouchableOpacity>
+        <Text style={{ fontSize: 20, fontWeight: '800', color: '#2e7d32' }}>Resource Hub</Text>
+      </View>
+      {resources.map((r, i) => (
+        <View key={i} style={{ backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 14, elevation: 2, borderLeftWidth: 4, borderLeftColor: r.color }}>
+          <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: r.color + '20', justifyContent: 'center', alignItems: 'center' }}>
+            <FontAwesome5 name={r.icon} size={16} color={r.color} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontWeight: '700', fontSize: 15, color: '#333', marginBottom: 4 }}>{r.title}</Text>
+            <Text style={{ fontSize: 13, color: '#666', lineHeight: 20 }}>{r.desc}</Text>
+          </View>
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function BenEventsScreen({ onClose }) {
+  const events = [
+    { icon: 'calendar-check', date: 'Jun 5, 2026', title: 'Community Food Distribution', location: 'Central Ground, Bengaluru', color: '#2e7d32', tag: 'Upcoming' },
+    { icon: 'utensils', date: 'Jun 10, 2026', title: 'Nutrition & Health Workshop', location: 'City Health Center, Hall 2', color: '#1565c0', tag: 'Upcoming' },
+    { icon: 'seedling', date: 'Jun 15, 2026', title: 'Organic Farming Demo', location: 'KR Market Garden, Bengaluru', color: '#558b2f', tag: 'Upcoming' },
+    { icon: 'graduation-cap', date: 'Jun 20, 2026', title: 'Skill Training — Tailoring', location: 'NGO Training Center, Koramangala', color: '#6a1b9a', tag: 'Open Registration' },
+    { icon: 'hands-helping', date: 'May 30, 2026', title: 'Volunteer Meet & Greet', location: 'HungerAid Office, MG Road', color: '#f57c00', tag: 'Completed' },
+    { icon: 'child', date: 'May 25, 2026', title: "Children's Nutrition Camp", location: 'Anganwadi Center, Jayanagar', color: '#ad1457', tag: 'Completed' },
+  ];
+  const tagColors = { Upcoming: '#2e7d32', 'Open Registration': '#1565c0', Completed: '#888' };
+  return (
+    <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 18 }}>
+        <TouchableOpacity onPress={onClose} style={{ marginRight: 12, padding: 6 }}>
+          <FontAwesome5 name="arrow-left" size={18} color="#2e7d32" />
+        </TouchableOpacity>
+        <Text style={{ fontSize: 20, fontWeight: '800', color: '#2e7d32' }}>Events & Workshops</Text>
+      </View>
+      {events.map((ev, i) => (
+        <View key={i} style={{ backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 12, elevation: 2, borderLeftWidth: 4, borderLeftColor: ev.color }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+            <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: ev.color + '20', justifyContent: 'center', alignItems: 'center', marginRight: 10 }}>
+              <FontAwesome5 name={ev.icon} size={14} color={ev.color} />
+            </View>
+            <Text style={{ flex: 1, fontWeight: '700', fontSize: 15, color: '#333' }}>{ev.title}</Text>
+            <View style={{ backgroundColor: (tagColors[ev.tag] || '#888') + '20', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 20 }}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: tagColors[ev.tag] || '#888' }}>{ev.tag}</Text>
+            </View>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <FontAwesome5 name="calendar" size={11} color="#999" />
+            <Text style={{ fontSize: 12, color: '#888' }}>{ev.date}</Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <FontAwesome5 name="map-marker-alt" size={11} color="#999" />
+            <Text style={{ fontSize: 12, color: '#888' }}>{ev.location}</Text>
+          </View>
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function BenHelpScreen({ onClose }) {
+  const [openIdx, setOpenIdx] = useState(null);
+  const faqs = [
+    { q: 'How do I accept a food donation?', a: 'Go to "My Aid Status" from the menu. When a donor offers food to you, it will appear there for you to accept or decline.' },
+    { q: 'How do I track my delivery?', a: 'Once a volunteer is assigned, go to "Track My Delivery" to see live location and estimated arrival time.' },
+    { q: 'What is the OTP for delivery verification?', a: "When the volunteer arrives, you'll receive a 4-digit OTP. Show it to the volunteer to confirm delivery and complete the process." },
+    { q: 'How do I update my profile?', a: 'Tap "Profile" in the menu. You can update your name, photo, address, and organization type from there.' },
+    { q: 'What food types does HungerAid deliver?', a: 'HungerAid delivers cooked meals, raw ingredients, and packaged food donated by individuals, restaurants, and organizations.' },
+    { q: 'How do I check food quality?', a: 'Use the "Food Quality Check" feature to take a photo of the food. Our AI will assess its safety and quality.' },
+    { q: 'Can I message my donor or volunteer?', a: 'Yes! Use "Inbox / Messages" to chat directly with donors and volunteers assigned to your delivery.' },
+    { q: "What if the food doesn't arrive?", a: 'If your delivery is delayed or missing, contact the volunteer via chat. You can also report the issue through Help & Support.' },
+  ];
+  return (
+    <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 18 }}>
+        <TouchableOpacity onPress={onClose} style={{ marginRight: 12, padding: 6 }}>
+          <FontAwesome5 name="arrow-left" size={18} color="#2e7d32" />
+        </TouchableOpacity>
+        <Text style={{ fontSize: 20, fontWeight: '800', color: '#2e7d32' }}>Help & Support</Text>
+      </View>
+      <Text style={{ fontSize: 15, color: '#555', marginBottom: 18, lineHeight: 22 }}>
+        Find answers to common questions below, or contact us directly.
+      </Text>
+      {faqs.map((item, i) => (
+        <TouchableOpacity
+          key={i}
+          onPress={() => setOpenIdx(openIdx === i ? null : i)}
+          style={{ backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 10, elevation: 1 }}
+          activeOpacity={0.8}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={{ flex: 1, fontWeight: '700', fontSize: 14, color: '#333' }}>{item.q}</Text>
+            <FontAwesome5 name={openIdx === i ? 'chevron-up' : 'chevron-down'} size={12} color="#999" />
+          </View>
+          {openIdx === i && (
+            <Text style={{ marginTop: 10, fontSize: 13, color: '#555', lineHeight: 20 }}>{item.a}</Text>
+          )}
+        </TouchableOpacity>
+      ))}
+      <View style={{ backgroundColor: '#e8f5e9', borderRadius: 14, padding: 16, marginTop: 10 }}>
+        <Text style={{ fontWeight: '700', fontSize: 15, color: '#2e7d32', marginBottom: 8 }}>Contact Support</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <FontAwesome5 name="envelope" size={14} color="#2e7d32" />
+          <Text style={{ color: '#333', fontSize: 13 }}>support@hungeraid.org</Text>
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <FontAwesome5 name="phone" size={14} color="#2e7d32" />
+          <Text style={{ color: '#333', fontSize: 13 }}>+91 80 1234 5678</Text>
+        </View>
+      </View>
+    </ScrollView>
+  );
+}
+
+function BenSettingsScreen({ userData, onClose }) {
+  const [notifEnabled, setNotifEnabled] = useState(true);
+  const [otpAlerts, setOtpAlerts] = useState(true);
+  const name = userData?.name || 'Beneficiary';
+  const email = userData?.email || 'No email on file';
+  const uid = userData?.uid || '';
+  return (
+    <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 18 }}>
+        <TouchableOpacity onPress={onClose} style={{ marginRight: 12, padding: 6 }}>
+          <FontAwesome5 name="arrow-left" size={18} color="#2e7d32" />
+        </TouchableOpacity>
+        <Text style={{ fontSize: 20, fontWeight: '800', color: '#2e7d32' }}>Settings</Text>
+      </View>
+      <Text style={{ fontSize: 13, fontWeight: '700', color: '#999', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Account</Text>
+      <View style={{ backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 20, elevation: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 14 }}>
+          <View style={{ width: 52, height: 52, borderRadius: 26, backgroundColor: '#c8e6c9', justifyContent: 'center', alignItems: 'center' }}>
+            <Text style={{ fontSize: 22, fontWeight: '800', color: '#2e7d32' }}>{name[0]?.toUpperCase()}</Text>
+          </View>
+          <View>
+            <Text style={{ fontSize: 16, fontWeight: '700', color: '#333' }}>{name}</Text>
+            <Text style={{ fontSize: 13, color: '#888' }}>{email}</Text>
+          </View>
+        </View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f0f0f0' }}>
+          <Text style={{ fontSize: 13, color: '#999' }}>Role</Text>
+          <Text style={{ fontSize: 13, fontWeight: '700', color: '#2e7d32' }}>Beneficiary</Text>
+        </View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingTop: 8 }}>
+          <Text style={{ fontSize: 13, color: '#999' }}>User ID</Text>
+          <Text style={{ fontSize: 11, color: '#bbb', flex: 1, textAlign: 'right' }}>{uid.slice(0, 16)}...</Text>
+        </View>
+      </View>
+      <Text style={{ fontSize: 13, fontWeight: '700', color: '#999', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Notifications</Text>
+      <View style={{ backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 20, elevation: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <View>
+            <Text style={{ fontWeight: '600', color: '#333', fontSize: 14 }}>Push Notifications</Text>
+            <Text style={{ fontSize: 12, color: '#999' }}>Donation offers and delivery updates</Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => setNotifEnabled(v => !v)}
+            style={{ width: 46, height: 26, borderRadius: 13, backgroundColor: notifEnabled ? '#2e7d32' : '#ccc', justifyContent: 'center', paddingHorizontal: 3 }}
+          >
+            <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: notifEnabled ? 'flex-end' : 'flex-start' }} />
+          </TouchableOpacity>
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <View>
+            <Text style={{ fontWeight: '600', color: '#333', fontSize: 14 }}>OTP Delivery Alerts</Text>
+            <Text style={{ fontSize: 12, color: '#999' }}>Show OTP banner on delivery arrival</Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => setOtpAlerts(v => !v)}
+            style={{ width: 46, height: 26, borderRadius: 13, backgroundColor: otpAlerts ? '#2e7d32' : '#ccc', justifyContent: 'center', paddingHorizontal: 3 }}
+          >
+            <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', alignSelf: otpAlerts ? 'flex-end' : 'flex-start' }} />
+          </TouchableOpacity>
+        </View>
+      </View>
+      <Text style={{ fontSize: 13, fontWeight: '700', color: '#999', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>About</Text>
+      <View style={{ backgroundColor: '#fff', borderRadius: 14, padding: 16, elevation: 1 }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' }}>
+          <Text style={{ fontSize: 14, color: '#555' }}>App Version</Text>
+          <Text style={{ fontSize: 14, fontWeight: '700', color: '#333' }}>1.0.0</Text>
+        </View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingTop: 12 }}>
+          <Text style={{ fontSize: 14, color: '#555' }}>Built By</Text>
+          <Text style={{ fontSize: 14, fontWeight: '700', color: '#2e7d32' }}>HungerAid Team</Text>
+        </View>
+      </View>
+    </ScrollView>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function BeneficiaryDashboard({ userData, onLogout }) {
   const [menuVisible, setMenuVisible] = useState(false);
   const [activeMenu, setActiveMenu] = useState('Home');
-  const [profilePic, setProfilePic] = useState(userData.profilePic || null);
+  const [profilePic, setProfilePic] = useState(
+    userData.profilePic ? { uri: userData.profilePic } : null
+  );
   const [firstName, setFirstName] = useState(userData.name ? userData.name.split(' ')[0] : '');
   const [lastName, setLastName] = useState(userData.name ? userData.name.split(' ')[1] || '' : '');
   const [pendingOffer, setPendingOffer] = useState(null);
@@ -38,17 +515,19 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     const uid = userData?.uid;
     if (!uid) return;
     const unsub = onSnapshot(doc(db, 'users', uid), (snap) => {
-      if (snap.exists()) {
-        const status = snap.data()?.status;
-        if (status === 'blocked') {
-          Alert.alert('Access Restricted', 'Your account has been blocked by the admin.');
-        }
+      if (snap.exists() && snap.data()?.status === 'blocked') {
+        Alert.alert('Access Restricted', 'Your account has been blocked by the admin.', [
+          { text: 'OK', onPress: () => { const { getAuth, signOut } = require('firebase/auth'); signOut(getAuth()); } },
+        ]);
       }
     });
     return () => unsub();
   }, [userData?.uid]);
 
 
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [activeOtpAlert,    setActiveOtpAlert]    = useState(null);
+  const lastOtpAlertIdRef = useRef(null);
   const [showPostModal, setShowPostModal] = useState(false);
   const [newPost, setNewPost] = useState('');
   const [newPostMedia, setNewPostMedia] = useState(null);
@@ -56,9 +535,11 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
   const { totalDelivered, totalMeals, activeDonors, loading: metricsLoading } = useImpactMetrics();
   const [commentInputs, setCommentInputs] = useState({});
   const [likedPosts, setLikedPosts] = useState({});
-  const [offerModal, setOfferModal] = useState(null);
-  const navigation = useNavigation();
   const db = getFirestore(app);
+  const [latestTrackingId, setLatestTrackingId] = useState(null);
+  const { tracking: liveTracking } = useDeliveryTracking(latestTrackingId);
+  const { stats: benStats, weeklyData: weeklyBenData } = useBenStats(userData?.uid);
+  const SCREEN_W = Dimensions.get('window').width;
 
   useEffect(() => {
     // Use the authenticated user for real-time offer listening
@@ -87,6 +568,93 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
     });
     return () => unsub();
   }, [userData]);
+
+  // Live delivery tracking for beneficiary
+  useEffect(() => {
+    const auth = getAuth();
+    const currentUser = auth.currentUser;
+    if (!currentUser?.uid) return;
+
+    const q = query(
+      collection(db, 'deliveryTracking'),
+      where('beneficiaryId', '==', currentUser.uid),
+      orderBy('updatedAt', 'desc'),
+      limit(1)
+    );
+
+    let fallbackUnsubscribe;
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      if (!snapshot.empty) {
+        setLatestTrackingId(snapshot.docs[0].id);
+      } else {
+        setLatestTrackingId(null);
+      }
+    }, (error) => {
+      if (error.code === 'failed-precondition') {
+        console.log("Index building. Falling back...");
+        const fallbackQ = query(collection(db, 'deliveryTracking'), where('beneficiaryId', '==', currentUser.uid));
+        fallbackUnsubscribe = onSnapshot(fallbackQ, (fallbackSnap) => {
+          if (!fallbackSnap.empty) {
+            // Sort client-side
+            const sortedDocs = fallbackSnap.docs.sort((a, b) => {
+              const dateA = a.data().updatedAt?.toMillis() || 0;
+              const dateB = b.data().updatedAt?.toMillis() || 0;
+              return dateB - dateA;
+            });
+            setLatestTrackingId(sortedDocs[0].id);
+          } else {
+            setLatestTrackingId(null);
+          }
+        });
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      if (fallbackUnsubscribe) fallbackUnsubscribe();
+    };
+  }, [db, userData?.uid]);
+
+  // ── Real-time OTP alert subscription ──────────────────────────────────────
+  useEffect(() => {
+    const uid = userData?.uid;
+    if (!uid) return;
+    const db = getFirestore(app);
+
+    const q = query(
+      collection(db, 'notifications'),
+      where('userId', '==', uid),
+      where('type', '==', 'otp_delivery'),
+      where('read', '==', false),
+      orderBy('createdAt', 'desc'),
+      limit(1)
+    );
+
+    return onSnapshot(q, (snap) => {
+      if (!snap.empty) {
+        const notif = { id: snap.docs[0].id, ...snap.docs[0].data() };
+        // Only show if it's a new notification we haven't shown yet
+        if (notif.id !== lastOtpAlertIdRef.current) {
+          lastOtpAlertIdRef.current = notif.id;
+          setActiveOtpAlert(notif);
+        }
+      } else {
+        setActiveOtpAlert(null);
+        lastOtpAlertIdRef.current = null;
+      }
+    }, (err) => console.warn('[BenDash] OTP alert subscription error:', err.message));
+  }, [userData?.uid]);
+
+  const dismissOtpAlert = async () => {
+    if (!activeOtpAlert) return;
+    try {
+      const db = getFirestore(app);
+      await updateDoc(doc(db, 'notifications', activeOtpAlert.id), { read: true });
+    } catch (e) {
+      console.warn('[OTP] Failed to mark notification as read:', e.message);
+    }
+    setActiveOtpAlert(null);
+  };
 
   const handleOpenPostModal = () => {
     setShowPostModal(true);
@@ -148,7 +716,10 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
 
   // Add this function to handle profile save from BeneficiaryProfile
   const handleProfileSave = updatedData => {
-    if (updatedData.profilePic) setProfilePic(updatedData.profilePic);
+    if (updatedData.profilePic) {
+      const pic = updatedData.profilePic;
+      setProfilePic(typeof pic === 'string' ? { uri: pic } : pic);
+    }
     if (updatedData.name) {
       const [f, ...rest] = updatedData.name.split(' ');
       setFirstName(f);
@@ -179,16 +750,29 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Hunger Aid</Text>
         </View>
-        <TouchableOpacity onPress={() => {}} style={styles.headerNotifBtn}>
+        <TouchableOpacity onPress={() => setShowNotifications((prev) => !prev)} style={styles.headerNotifBtn}>
           <FontAwesome5 name="bell" size={22} color="#fff" />
         </TouchableOpacity>
       </View>
+
+      {/* OTP Alert Banner */}
+      {activeOtpAlert && !showNotifications && (
+        <OTPAlertBanner notification={activeOtpAlert} onDismiss={dismissOtpAlert} />
+      )}
+
       {/* Main Content */}
-      {activeMenu === 'Profile' ? (
+      {showNotifications ? (
+        <NotificationsScreen />
+      ) : activeMenu === 'Profile' ? (
         <BeneficiaryProfile
           userData={userData}
           onSave={handleProfileSave}
           onClose={() => setActiveMenu('Home')}
+        />
+      ) : activeMenu === 'Track My Delivery' ? (
+        <BeneficiaryTrackingView
+          userData={userData}
+          onBack={() => setActiveMenu('Home')}
         />
       ) : activeMenu === 'My Aid Status' ? (
         <BDonationScreen
@@ -207,31 +791,121 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
         />
       ) : activeMenu === 'Food Quality Check' ? (
         <FoodQualityScreen />
+      ) : activeMenu === 'Inbox / Messages' ? (
+        <ChatListScreen
+          currentUserId={userData?.uid}
+          currentUserName={userData?.name || 'Beneficiary'}
+          currentUserRole="Beneficiary"
+          onBack={() => setActiveMenu('Home')}
+        />
+      ) : activeMenu === 'Resource Hub' ? (
+        <BenResourceHub onClose={() => setActiveMenu('Home')} />
+      ) : activeMenu === 'Events & Workshops' ? (
+        <BenEventsScreen onClose={() => setActiveMenu('Home')} />
+      ) : activeMenu === 'Help & Support' ? (
+        <BenHelpScreen onClose={() => setActiveMenu('Home')} />
+      ) : activeMenu === 'Settings' ? (
+        <BenSettingsScreen userData={userData} onClose={() => setActiveMenu('Home')} />
       ) : (
         <ScrollView contentContainerStyle={styles.feed}>
-          {/* Welcome Card */}
-          <View style={styles.cardWelcome}>
-            <Text style={styles.cardWelcomeText}>Welcome back, {userData.name ? userData.name.split(' ')[0] : 'Beneficiary'}! Check available donations near you.</Text>
+          {/* Welcome Banner */}
+          <View style={{ backgroundColor: '#2e7d32', borderRadius: 18, padding: 16, marginBottom: 14, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <View style={{ width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(255,255,255,0.2)', justifyContent: 'center', alignItems: 'center' }}>
+              <Text style={{ fontSize: 20, fontWeight: '800', color: '#fff' }}>{firstName ? firstName[0].toUpperCase() : 'B'}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13 }}>Welcome back</Text>
+              <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800' }}>{firstName || 'Beneficiary'}</Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setActiveMenu('My Aid Status')}
+              style={{ backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 6 }}
+              activeOpacity={0.8}
+            >
+              <FontAwesome5 name="clipboard-list" size={13} color="#fff" />
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>My Aid</Text>
+            </TouchableOpacity>
           </View>
-          {/* Impact Metrics */}
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 14, gap: 10 }}>
-            <View style={{ flex: 1, backgroundColor: '#e8f5e9', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
-              <FontAwesome5 name="utensils" size={22} color="#2e7d32" />
-              <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#2e7d32', marginTop: 6 }}>{metricsLoading ? '...' : totalMeals}</Text>
-              <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Meals Delivered</Text>
+
+          {/* Live Delivery Alert */}
+          {liveTracking && (
+            <TouchableOpacity
+              onPress={() => setActiveMenu('Track My Delivery')}
+              style={{ backgroundColor: '#0e4d91', borderRadius: 14, padding: 14, marginBottom: 14, flexDirection: 'row', alignItems: 'center', gap: 10 }}
+              activeOpacity={0.85}
+            >
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#4fc3f7' }} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Live Delivery Active</Text>
+                <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>
+                  {liveTracking.currentStatus || 'In Progress'}{liveTracking.etaMinutes != null ? ` · ETA ${liveTracking.etaMinutes} min` : ''}
+                </Text>
+              </View>
+              <FontAwesome5 name="chevron-right" size={12} color="rgba(255,255,255,0.5)" />
+            </TouchableOpacity>
+          )}
+
+          {/* OTP Card */}
+          {liveTracking?.verification?.otp && !liveTracking?.verification?.verified && (
+            <View style={{ backgroundColor: 'rgba(14,10,30,0.95)', borderRadius: 16, padding: 16, marginBottom: 14, borderWidth: 1.5, borderColor: 'rgba(156,39,176,0.4)' }}>
+              <Text style={{ color: '#ce93d8', fontWeight: '700', marginBottom: 10 }}>Delivery Verification OTP</Text>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                {String(liveTracking.verification.otp).split('').map((d, i) => (
+                  <View key={i} style={{ width: 48, height: 56, borderRadius: 10, backgroundColor: 'rgba(156,39,176,0.15)', borderWidth: 1.5, borderColor: 'rgba(156,39,176,0.4)', justifyContent: 'center', alignItems: 'center' }}>
+                    <Text style={{ color: '#ce93d8', fontSize: 24, fontWeight: '800' }}>{d}</Text>
+                  </View>
+                ))}
+              </View>
+              <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12 }}>Share this code with the volunteer when they arrive.</Text>
             </View>
-            <View style={{ flex: 1, backgroundColor: '#e3f2fd', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
-              <FontAwesome5 name="box-open" size={22} color="#1976d2" />
-              <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#1976d2', marginTop: 6 }}>{metricsLoading ? '...' : totalDelivered}</Text>
-              <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Deliveries Done</Text>
-            </View>
-            <View style={{ flex: 1, backgroundColor: '#fff3e0', borderRadius: 14, padding: 14, alignItems: 'center', elevation: 2 }}>
-              <FontAwesome5 name="hands-helping" size={22} color="#f57c00" />
-              <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#f57c00', marginTop: 6 }}>{metricsLoading ? '...' : activeDonors}</Text>
-              <Text style={{ fontSize: 11, color: '#555', fontWeight: '600', textAlign: 'center' }}>Active Donors</Text>
-            </View>
+          )}
+
+          {/* Aid KPI Pills */}
+          <Text style={{ fontSize: 15, fontWeight: '800', color: '#2e7d32', marginBottom: 10 }}>Your Aid Summary</Text>
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 18 }}>
+            <BKpiPill icon="box-open" label="Received" value={benStats.received} color="#2e7d32" />
+            <BKpiPill icon="clock" label="Pending" value={benStats.pending} color="#f57c00" />
+            <BKpiPill icon="truck" label="In Transit" value={benStats.inTransit} color="#1565c0" />
+            <BKpiPill icon="times-circle" label="Declined" value={benStats.declined} color="#c62828" />
           </View>
-          {/* Feed posts */}
+
+          {/* Activity Chart */}
+          <Text style={{ fontSize: 15, fontWeight: '800', color: '#2e7d32', marginBottom: 10 }}>Aid Activity (Last 7 Days)</Text>
+          <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 12, marginBottom: 18, elevation: 2 }}>
+            <BarChart
+              data={{
+                labels: ['7d', '6d', '5d', '4d', '3d', '2d', 'Today'],
+                datasets: [{ data: weeklyBenData.map(v => v || 0) }],
+              }}
+              width={SCREEN_W - 56}
+              height={180}
+              chartConfig={benChartConfig}
+              style={{ borderRadius: 12 }}
+              showValuesOnTopOfBars
+              fromZero
+            />
+          </View>
+
+          {/* Platform Impact */}
+          <Text style={{ fontSize: 15, fontWeight: '800', color: '#2e7d32', marginBottom: 10 }}>Platform Impact</Text>
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 18 }}>
+            <BKpiPill icon="utensils" label="Total Meals" value={metricsLoading ? '...' : totalMeals} color="#388e3c" />
+            <BKpiPill icon="box-open" label="Deliveries" value={metricsLoading ? '...' : totalDelivered} color="#1976d2" />
+            <BKpiPill icon="hands-helping" label="Donors" value={metricsLoading ? '...' : activeDonors} color="#f57c00" />
+          </View>
+
+          {/* Community Feed */}
+          <Text style={{ fontSize: 15, fontWeight: '800', color: '#2e7d32', marginBottom: 10 }}>Community Feed</Text>
+          <TouchableOpacity
+            onPress={handleOpenPostModal}
+            style={{ backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 14, flexDirection: 'row', alignItems: 'center', gap: 10, elevation: 1, borderWidth: 1, borderColor: '#e8f5e9' }}
+          >
+            <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: '#c8e6c9', justifyContent: 'center', alignItems: 'center' }}>
+              <Text style={{ fontSize: 15, fontWeight: '800', color: '#2e7d32' }}>{firstName ? firstName[0].toUpperCase() : 'B'}</Text>
+            </View>
+            <Text style={{ flex: 1, color: '#aaa', fontSize: 14 }}>Share something with the community...</Text>
+            <FontAwesome5 name="pen" size={13} color="#2e7d32" />
+          </TouchableOpacity>
           {feedPosts.map(post => (
             <View key={post.id} style={styles.feedPostCard}>
               <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
@@ -249,24 +923,13 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
                 )
               )}
               <View style={styles.feedPostActions}>
-                <TouchableOpacity
-                  onPress={() => handleToggleLikePost(post.id)}
-                  style={styles.feedPostActionBtn}
-                >
-                  <FontAwesome5
-                    name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"}
-                    size={16}
-                    color={likedPosts[post.id] ? "#2e7d32" : "#888"}
-                  />
-                  <Text style={[
-                    styles.feedPostActionText,
-                    likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }
-                  ]}>
+                <TouchableOpacity onPress={() => handleToggleLikePost(post.id)} style={styles.feedPostActionBtn}>
+                  <FontAwesome5 name={likedPosts[post.id] ? "thumbs-up" : "thumbs-o-up"} size={16} color={likedPosts[post.id] ? "#2e7d32" : "#888"} />
+                  <Text style={[styles.feedPostActionText, likedPosts[post.id] && { color: "#2e7d32", fontWeight: "bold" }]}>
                     {likedPosts[post.id] ? "Liked" : "Like"}
                   </Text>
                 </TouchableOpacity>
               </View>
-              {/* Comments */}
               <View style={styles.feedPostComments}>
                 {(post.comments || []).map((c, idx) => (
                   <View key={idx} style={styles.feedPostComment}>
@@ -358,7 +1021,7 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
                   icon={opt.icon}
                   label={opt.label}
                   active={activeMenu === opt.label}
-                  onPress={() => setActiveMenu(opt.label)}
+                  onPress={() => { setActiveMenu(opt.label); setMenuVisible(false); }}
                 />
               ))}
             </View>
@@ -366,44 +1029,6 @@ export default function BeneficiaryDashboard({ userData, onLogout }) {
               <FontAwesome5 name="lock" size={20} color="#2e7d32" />
               <Text style={styles.drawerLogoutText}>Logout</Text>
             </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-      {/* Offer Modal */}
-      <Modal visible={!!offerModal} transparent animationType="slide">
-        <View style={{
-          flex: 1, backgroundColor: 'rgba(0,0,0,0.3)', justifyContent: 'center', alignItems: 'center'
-        }}>
-          <View style={{
-            backgroundColor: '#fff', borderRadius: 16, padding: 24, width: '85%', alignItems: 'center'
-          }}>
-            <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#1976d2', marginBottom: 12 }}>
-              New Food Donation Available!
-            </Text>
-            {offerModal && (
-              <>
-                <Text style={{ fontSize: 16, color: '#333', marginBottom: 8 }}>
-                  A donation of <Text style={{ fontWeight: 'bold' }}>{offerModal.foodItem}</Text> is available nearby.
-                </Text>
-                <Text style={{ fontSize: 14, color: '#888', marginBottom: 18 }}>
-                  You have 5 minutes to respond.
-                </Text>
-                <TouchableOpacity
-                  style={{
-                    backgroundColor: '#28a745', borderRadius: 8, paddingVertical: 12, paddingHorizontal: 32, marginBottom: 10
-                  }}
-                  onPress={() => {
-                    setOfferModal(null);
-                    navigation.navigate('BDonationScreen', { donationDetails: offerModal });
-                  }}
-                >
-                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>View Offer</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setOfferModal(null)}>
-                  <Text style={{ color: '#1976d2', fontWeight: 'bold', fontSize: 15 }}>Dismiss</Text>
-                </TouchableOpacity>
-              </>
-            )}
           </View>
         </View>
       </Modal>
@@ -427,7 +1052,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#2e7d32',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: (Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 44) + 8,
+    paddingBottom: 12,
     borderBottomWidth: 0,
     justifyContent: 'flex-start',
   },

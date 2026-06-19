@@ -55,22 +55,24 @@ When beneficiary accepts:
 ```javascript
 // Queries users collection
 where('role', '==', 'Volunteer')
-where('availability', '==', 'available')
+where('transportAvailability', '==', true)
 // Calculates distance using Haversine formula
 ```
 
-#### Step 2: Create Transport Request
-**Collection:** `transportRequests/{donationId}`
+#### Step 2: Create Delivery Tracking
+**Collection:** `deliveryTracking/{donationId}`
 ```javascript
 {
   donationId: "donation_id",       // ✅ Links to donation
   donorId: "donor_uid",            // ✅ Links to donor
   beneficiaryId: "beneficiary_uid", // ✅ Links to beneficiary
   volunteerId: "volunteer_uid",     // ✅ Links to volunteer
-  pickupLocation: { latitude, longitude, address },
-  dropLocation: { latitude, longitude, address },
-  status: "pending",
-  createdAt: timestamp
+  pickupLocation: { lat, lng, address },
+  dropLocation: { lat, lng, address },
+  currentStatus: "Volunteer Assigned",
+  timelineEvents: [ ... ],
+  createdAt: timestamp,
+  updatedAt: timestamp
 }
 ```
 
@@ -80,9 +82,7 @@ where('availability', '==', 'available')
 ```javascript
 {
   assignedVolunteerId: "volunteer_uid",
-  deliveryStatus: "pending_volunteer_response",
-  status: "assigned_to_volunteer",
-  assignedAt: timestamp
+  updatedAt: timestamp
 }
 ```
 
@@ -98,7 +98,7 @@ where('availability', '==', 'available')
 **Real-time Listeners:**
 - Volunteer's `TransportRequestScreen.js` listens for:
   - `volunteerId == volunteer_uid`
-  - `status in ['pending', 'accepted']`
+  - `currentStatus == 'Volunteer Assigned'`
 
 ---
 
@@ -108,9 +108,8 @@ where('availability', '==', 'available')
 **Service:** `volunteerAssignmentService.js` → `acceptDelivery()`
 
 Updates:
-1. **Donation:** `status = "in_delivery"`, `deliveryStatus = "accepted_by_volunteer"`
-2. **Transport Request:** `status = "accepted"`
-3. **Volunteer:** `availability = "busy"`, `currentDeliveryStatus = "in_progress"`
+1. **Delivery Tracking:** `currentStatus = "En Route to Donor"`
+2. **Volunteer:** `availability = "busy"`
 
 **Visible to:** Donor, Beneficiary, Volunteer (via real-time listeners)
 
@@ -118,10 +117,9 @@ Updates:
 **Service:** `volunteerAssignmentService.js` → `rejectDelivery()`
 
 Updates:
-1. **Donation:** `deliveryStatus = "rejected_by_volunteer"`, `assignedVolunteerId = null`
-2. **Transport Request:** DELETED
+1. **Donation:** `assignedVolunteerId = null`
+2. **Delivery Tracking:** `currentStatus = "Failed"`
 3. **Volunteer:** `availability = "available"`, `assignedDonationId = null`
-4. **System:** Automatically finds next nearest volunteer and reassigns
 
 **Visible to:** All parties
 
@@ -131,8 +129,8 @@ Updates:
 **Service:** `deliveryStatusService.js` → `completeDelivery()`
 
 Updates:
-1. **Donation:** `status = "delivered"`, `deliveryStatus = "completed"`
-2. **Transport Request:** `status = "completed"`
+1. **Donation:** `status = "completed"`
+2. **Delivery Tracking:** `currentStatus = "Completed Verified"`
 3. **Volunteer:** `availability = "available"`, `assignedDonationId = null`
 
 **Visible to:** All parties
@@ -152,9 +150,9 @@ where('status', '==', 'Offered')
 
 #### Volunteer Dashboard
 ```javascript
-// Listens for transport requests assigned to them
+// Listens for delivery assignments in centralized tracking
 where('volunteerId', '==', volunteer_uid)
-where('status', 'in', ['pending', 'accepted'])
+where('currentStatus', '==', 'Volunteer Assigned')
 ```
 
 #### Donor Dashboard (Future)
@@ -169,22 +167,26 @@ where('donorId', '==', donor_uid)
 
 ```
 Donor Creates
-    ↓
+  ↓
 [Offered] → Beneficiary sees in My Aid Status
-    ↓
+  ↓
 Beneficiary Accepts
-    ↓
-[accepted_by_beneficiary] → System finds volunteer
-    ↓
-[assigned_to_volunteer] → Volunteer sees in Transport Requests
-    ↓
-Volunteer Accepts
-    ↓
-[in_delivery] → All parties see "In Delivery"
-    ↓
-Delivery Completed
-    ↓
-[delivered/completed] → All parties see "Completed"
+  ↓
+deliveryTracking: Pending Pickup
+  ↓
+Volunteer Assigned
+  ↓
+En Route to Donor
+  ↓
+Food Picked Up
+  ↓
+Out For Delivery
+  ↓
+Arriving Soon
+  ↓
+Delivered Pending Verification
+  ↓
+Completed Verified
 ```
 
 ---
@@ -196,15 +198,16 @@ Delivery Completed
 - `beneficiaryId` / `offeredTo` - Links to beneficiary
 - `assignedVolunteerId` - Links to volunteer
 - `status` - Overall status
-- `deliveryStatus` - Delivery-specific status
 
-### transportRequests
+### deliveryTracking
 - `donationId` - Links to donation
 - `donorId` - Links to donor
 - `beneficiaryId` - Links to beneficiary
 - `volunteerId` - Links to volunteer
-- `pickupLocation` - Donor location
-- `dropLocation` - Beneficiary location
+- `currentStatus` - Central delivery status
+- `pickupLocation` - Donor pickup location
+- `dropLocation` - Beneficiary drop-off location
+- `timelineEvents` - Status transitions
 
 ### users
 - `role` - "Donor", "Beneficiary", "Volunteer"
@@ -226,8 +229,8 @@ All multi-document updates use Firebase `runTransaction()` to ensure:
 
 ## Error Handling
 
-- **No volunteer available:** Donation marked as `waiting_for_volunteer`
-- **Volunteer rejects:** Auto-reassigns to next nearest volunteer
+- **No volunteer available:** Delivery remains `Pending Pickup`
+- **Volunteer rejects:** Delivery marked `Failed`
 - **Location missing:** Prevents acceptance until location is set
 - **Network failures:** Transactions automatically retry
 

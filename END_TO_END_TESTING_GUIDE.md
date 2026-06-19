@@ -29,17 +29,17 @@
    - Verifies beneficiary location is set
    - Gets donor location from donation
    - Gets donor address from users collection
-   - Updates donation: `status = "accepted_by_beneficiary"`
-   - Calls `handleDonationAcceptance()`
+  - Updates donation: `status = "accepted_by_beneficiary"` and `beneficiaryId`
+  - Creates deliveryTracking with `currentStatus = "Pending Pickup"`
+  - Calls `handleDonationAcceptance()`
 
 ---
 
 ### Step 3: Find Nearest Available Volunteer
-1. **Service:** `services/volunteerAssignmentService.js` → `findNearestAvailableVolunteer()`
+1. **Service:** `services/volunteerAssignmentService.js` → `findAllAvailableVolunteers()`
 2. **Query:**
    ```javascript
-   where('role', '==', 'Volunteer')
-   where('availability', '==', 'available')
+  where('transportAvailability', '==', true)
    ```
 3. **Calculation:** Uses Haversine formula to find nearest
 4. **Result:** Returns volunteer with distance
@@ -47,40 +47,26 @@
 ---
 
 ### Step 4: Assign to Volunteer (Transaction)
-1. **Service:** `volunteerAssignmentService.js` → `assignDonationToVolunteer()`
+1. **Service:** `volunteerAssignmentService.js` → `assignNearestVolunteer()`
 2. **Updates (Atomic Transaction):**
 
    **A. Donation Document:**
    ```javascript
    {
      assignedVolunteerId: "volunteer_uid",
-     deliveryStatus: "pending_volunteer_response",
-     status: "assigned_to_volunteer",
-     assignedAt: timestamp
+     updatedAt: timestamp
    }
    ```
 
-   **B. Create Transport Request:**
+   **B. Delivery Tracking:**
    ```javascript
-   transportRequests/{donationId} = {
+   deliveryTracking/{donationId} = {
      donationId,
      volunteerId,
-     donorId,
-     beneficiaryId,
-     pickupLocation: { latitude, longitude, address },
-     dropLocation: { latitude, longitude, address },
-     donationDetails: { items, quantity, description },
-     status: "pending",
-     createdAt: timestamp
-   }
-   ```
-
-   **C. Update Volunteer:**
-   ```javascript
-   users/{volunteerId} = {
-     availability: "busy",
-     assignedDonationId: "donation_id",
-     updatedAt: timestamp
+     pickupLocation: { lat, lng, address },
+     dropLocation: { lat, lng, address },
+     currentStatus: "Volunteer Assigned",
+     timelineEvents: [ ... ]
    }
    ```
 
@@ -90,8 +76,8 @@
 1. **File:** `screens/volunteer/TransportRequestScreen.js`
 2. **Real-time Listener:**
    ```javascript
-   where('volunteerId', '==', volunteer_uid)
-   where('status', 'in', ['pending', 'accepted'])
+  where('volunteerId', '==', volunteer_uid)
+  where('currentStatus', '==', 'Volunteer Assigned')
    ```
 3. **Display:**
    - Shows donation details
@@ -106,18 +92,17 @@
 1. **Button:** Accept button on transport request card
 2. **Service:** `volunteerAssignmentService.js` → `acceptDelivery()`
 3. **Updates:**
-   - Donation: `status = "in_delivery"`
-   - Transport Request: `status = "accepted"`
-   - Volunteer: `availability = "busy"`, `currentDeliveryStatus = "in_progress"`
+  - Delivery Tracking: `currentStatus = "En Route to Donor"`
+  - Volunteer: `availability = "busy"`
 
 #### Reject Delivery
 1. **Button:** Reject button on transport request card
 2. **Service:** `volunteerAssignmentService.js` → `rejectDelivery()`
 3. **Updates:**
-   - Donation: `assignedVolunteerId = null`
-   - Transport Request: DELETED
+  - Donation: `assignedVolunteerId = null`
+  - Delivery Tracking: `currentStatus = "Failed"`
    - Volunteer: `availability = "available"`, `assignedDonationId = null`
-4. **Auto-Reassign:** Finds next nearest volunteer
+4. **Next Step:** Admin or system can manually reassign if needed
 
 ---
 
@@ -169,30 +154,28 @@
   offeredTo: string,
   beneficiaryId: string,
   assignedVolunteerId: string,
-  status: "Offered" | "accepted_by_beneficiary" | "assigned_to_volunteer" | "in_delivery" | "delivered",
-  deliveryStatus: string,
+  status: "Offered" | "accepted_by_beneficiary" | "completed" | "cancelled",
   location: { latitude, longitude },
   createdAt: timestamp,
   acceptedAt: timestamp,
-  assignedAt: timestamp,
-  deliveredAt: timestamp
+  completedAt: timestamp
 }
 ```
 
-### transportRequests/{donationId}
+### deliveryTracking/{donationId}
 ```javascript
 {
   donationId: string,
   volunteerId: string,
   donorId: string,
   beneficiaryId: string,
-  pickupLocation: { latitude, longitude, address },
-  dropLocation: { latitude, longitude, address },
-  donationDetails: { items, quantity, description },
-  status: "pending" | "accepted" | "completed",
+  pickupLocation: { lat, lng, address },
+  dropLocation: { lat, lng, address },
+  volunteerLocation: { lat, lng, lastPing },
+  currentStatus: "Pending Pickup" | "Volunteer Assigned" | "En Route to Donor" | "Food Picked Up" | "Out For Delivery" | "Arriving Soon" | "Delivered Pending Verification" | "Completed Verified" | "Failed" | "Cancelled",
+  timelineEvents: [ { status, timestamp, actor, notes } ],
   createdAt: timestamp,
-  acceptedAt: timestamp,
-  completedAt: timestamp
+  updatedAt: timestamp
 }
 ```
 
@@ -215,21 +198,21 @@
 ### If volunteer doesn't see request:
 1. Check volunteer location is set (should show "Last updated" message)
 2. Check volunteer `availability` in Firebase is "available"
-3. Check `transportRequests` collection in Firebase - document should exist
+3. Check `deliveryTracking` collection in Firebase - document should exist
 4. Check browser console for errors
-5. Verify Firestore rules allow creating `transportRequests`
+5. Verify Firestore rules allow creating `deliveryTracking`
 
 ### If assignment fails:
 1. Check donor location in donation document
 2. Check beneficiary location in users document
 3. Check volunteer location in users document
 4. Look for console errors starting with 📦
-5. Check Firebase rules for donations and transportRequests collections
+5. Check Firebase rules for donations and deliveryTracking collections
 
 ### If volunteer can't see assignment:
 1. Verify query matches:
    - `volunteerId` == current volunteer UID
-   - `status` in ['pending', 'accepted']
+  - `currentStatus` == "Volunteer Assigned"
 2. Check Firebase listener is active
 3. Check network tab for real-time updates
 

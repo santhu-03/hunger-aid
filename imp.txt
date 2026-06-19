@@ -1,0 +1,994 @@
+# 1. Intelligent Volunteer Assignment Module
+
+## Location-Based Volunteer Assignment Algorithm
+This logic ranks eligible volunteers by distance from the pickup location using the Haversine formula.
+```js
+export function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c * 100) / 100;
+}
+
+const q = query(
+  collection(db, 'users'),
+  where('role', '==', 'Volunteer'),
+  where('transportAvailability', '==', true)
+);
+let snapshot = await getDocs(q);
+availableVolunteers.sort((a, b) => a.distance - b.distance);
+```
+
+## Volunteer Availability Filtering Logic
+This transaction checks volunteer state, self-heals stale assignments, and blocks only genuinely unavailable volunteers.
+```js
+const isBusy = String(volunteerData.availability || '').toLowerCase() === 'busy';
+const isOffline = volunteerData.transportActive === false;
+const TERMINAL = ['Completed', 'Completed Verified', 'Failed', 'Cancelled'];
+let isStuck = false;
+
+if (volunteerData.assignedDonationId) {
+  const prevSnap = await transaction.get(doc(db, 'donations', volunteerData.assignedDonationId));
+  const prevStatus = prevSnap.exists() ? prevSnap.data().status : null;
+  if (TERMINAL.includes(prevStatus) || !prevSnap.exists()) {
+    isStuck = true;
+  } else {
+    throw new Error('Volunteer unavailable');
+  }
+} else if (isBusy) {
+  isStuck = true;
+}
+
+if ((isOffline || isBusy) && !isStuck) throw new Error('Volunteer unavailable');
+```
+
+## Automatic Reassignment Workflow
+This recovery sweep reassigns deliveries when volunteers time out or go offline.
+```js
+const q = query(
+  collection(db, 'deliveryTracking'),
+  where('currentStatus', 'in', activeStatuses),
+  limit(100)
+);
+
+if (status === 'Volunteer Assigned' && minutesSinceUpdate > VOLUNTEER_ACCEPT_TIMEOUT_MINS) {
+  await rejectDelivery(donationId, volunteerId, data.pickupLocation, data.dropLocation, null);
+}
+
+if (status === 'En Route to Donor' && minutesSincePing > VOLUNTEER_OFFLINE_TIMEOUT_MINS) {
+  await rejectDelivery(donationId, volunteerId, data.pickupLocation, data.dropLocation, null);
+}
+```
+
+# 2. Live Route Tracking Implementation
+
+## GPS Location Tracking Integration
+This service creates the live tracking document and updates the volunteer's current GPS position in Firestore.
+```js
+export async function startTrackingSession(donationId, volunteerId) {
+  const db = getFirestore();
+  await setDoc(doc(db, 'liveTracking', donationId), {
+    trackingId: donationId,
+    deliveryId: donationId,
+    volunteerId,
+    latitude: null,
+    longitude: null,
+    status: 'active',
+    sessionStartedAt: serverTimestamp(),
+    lastUpdateAt: serverTimestamp(),
+  }, { merge: true });
+}
+
+export async function updateLiveLocation(donationId, position) {
+  await updateDoc(doc(db, 'liveTracking', donationId), {
+    latitude: position.latitude,
+    longitude: position.longitude,
+    heading: position.heading ?? null,
+    speed: position.speed ?? null,
+    accuracy: position.accuracy ?? null,
+    lastUpdateAt: serverTimestamp(),
+  });
+}
+```
+
+## Real-Time Route Polyline Rendering
+This route fetcher decodes the Google polyline so the map can render the full route path.
+```js
+export async function fetchRoute(origin, destination, opts = {}) {
+  const params = new URLSearchParams({
+    origin: `${origin.latitude},${origin.longitude}`,
+    destination: `${destination.latitude},${destination.longitude}`,
+    mode: 'driving',
+    key: GOOGLE_MAPS_KEY,
+  });
+  const json = await (await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params}`)).json();
+  const leg = json.routes[0].legs[0];
+  const poly = json.routes[0].overview_polyline.points;
+  const coords = decodePolyline(poly);
+
+  return {
+    polylineCoords: coords,
+    encodedPolyline: poly,
+    distanceMeters: leg.distance.value,
+    durationSeconds: leg.duration.value,
+    steps: leg.steps.map(s => ({
+      instruction: s.html_instructions.replace(/<[^>]+>/g, ''),
+      distanceMeters: s.distance.value,
+      durationSeconds: s.duration.value,
+    })),
+  };
+}
+```
+
+## ETA Calculation Function
+This ETA helper prefers traffic-aware Google data and falls back to Haversine distance plus a default speed.
+```js
+export async function calculateETA(currentPos, destination, knownSpeedMs = null) {
+  const distKm = haversineKm(
+    currentPos.latitude, currentPos.longitude,
+    destination.latitude, destination.longitude
+  );
+
+  if (GOOGLE_MAPS_KEY) {
+    const matrix = await fetchDistanceMatrix([currentPos], [destination]);
+    if (matrix?.[0]?.[0]?.durationSeconds != null) {
+      const el = matrix[0][0];
+      const secs = el.durationInTrafficSeconds ?? el.durationSeconds;
+      return { etaMinutes: Math.max(1, Math.ceil(secs / 60)), distanceMeters: el.distanceMeters, source: 'google_matrix' };
+    }
+  }
+
+  const speedKmh = knownSpeedMs != null && knownSpeedMs > 0.5 ? (knownSpeedMs * 3.6) : 20;
+  return {
+    etaMinutes: Math.max(1, Math.ceil((distKm / speedKmh) * 60)),
+    distanceMeters: Math.round(distKm * 1000),
+    source: 'haversine',
+  };
+}
+```
+
+## Volunteer Live Tracking Synchronization
+This hook keeps the donor and beneficiary views synchronized through live Firestore listeners.
+```js
+useEffect(() => {
+  const unsub = subscribeToLiveTracking(donationId, (data) => {
+    setTrackingDoc(data);
+    if (data?.latitude && data?.longitude) {
+      setVolunteerPos({
+        latitude: data.latitude,
+        longitude: data.longitude,
+        heading: data.heading ?? null,
+        speed: data.speed ?? null,
+        accuracy: data.accuracy ?? null,
+        _source: 'live',
+      });
+    }
+  });
+  return () => unsub();
+}, [donationId]);
+```
+
+# 3. OTP-Based Delivery Verification
+
+## OTP Generation Function
+This function creates a 4-digit OTP, stores it with the delivery request, and notifies the beneficiary.
+```js
+export function generateOTP() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+export async function createAndStoreOTP(requestId, beneficiaryId, volunteerId = null, donorId = null) {
+  const otp = generateOTP();
+  await setDoc(doc(db, 'foodRequests', requestId), {
+    otp,
+    otpVerified: false,
+    otpCreatedAt: serverTimestamp(),
+    otpAttempts: 0,
+    otpExpired: false,
+    otpCleared: false,
+    otpResendCount: 0,
+    ...(beneficiaryId && { beneficiaryId }),
+    ...(volunteerId && { volunteerId }),
+    ...(donorId && { donorId }),
+  }, { merge: true });
+  await sendOTPNotification(beneficiaryId, otp, requestId);
+  return otp;
+}
+```
+
+## OTP Validation Logic
+This validation flow prevents reuse, enforces expiry, and limits incorrect attempts before marking the delivery complete.
+```js
+export async function validateOTP(requestId, inputOtp) {
+  const ref = doc(db, 'foodRequests', requestId);
+  const snap = await getDoc(ref);
+  const { otp, otpVerified, otpCreatedAt, otpAttempts = 0, otpExpired = false, otpCleared = false } = snap.data();
+
+  if (otpVerified || otpCleared || !otp || otpExpired) return { valid: false, error: 'OTP is no longer valid for this request.' };
+  if (otpCreatedAt && Date.now() - otpCreatedAt.toMillis() > OTP_EXPIRY_MS) {
+    await updateDoc(ref, { otpExpired: true });
+    return { valid: false, error: 'OTP expired. Ask the beneficiary for a new code.' };
+  }
+  if (otpAttempts >= MAX_OTP_ATTEMPTS) return { valid: false, error: 'Maximum attempts reached. Ask for a new OTP.', attemptsLeft: 0 };
+
+  await updateDoc(ref, { otpAttempts: otpAttempts + 1 });
+  if (String(otp).trim() !== String(inputOtp).trim()) return { valid: false, error: 'Incorrect OTP.' };
+
+  await updateDoc(ref, { otpVerified: true, otpVerifiedAt: serverTimestamp(), status: 'Completed', otp: null, otpCleared: true });
+  return { valid: true, attemptsLeft: MAX_OTP_ATTEMPTS - (otpAttempts + 1) };
+}
+```
+
+## Secure Delivery Verification Workflow
+This guard prevents unauthorized OTP resends and atomically replaces the code when a resend is allowed.
+```js
+export async function canResendOTP(requestId, volunteerId = null) {
+  const snap = await getDoc(doc(db, 'foodRequests', requestId));
+  const data = snap.data();
+  if (volunteerId && data.volunteerId && data.volunteerId !== volunteerId) {
+    return { allowed: false, reason: 'You are not assigned to this delivery.' };
+  }
+  if (data.otpVerified || data.status === 'Completed' || data.status === 'Completed Verified') {
+    return { allowed: false, reason: 'Delivery is already completed.' };
+  }
+  if ((data.otpResendCount || 0) >= MAX_OTP_RESENDS) {
+    return { allowed: false, reason: `Maximum ${MAX_OTP_RESENDS} resends reached.` };
+  }
+  return { allowed: true };
+}
+```
+
+# 4. Geofencing Implementation
+
+## Geofence Boundary Creation
+This manager creates the geofence document and stores pickup and drop boundaries for the active delivery.
+```js
+createOrUpdateGeofenceDoc(db, donationId, {
+  donationId,
+  volunteerId,
+  pickupLocation: pickupLocation ?? null,
+  dropLocation: dropLocation ?? null,
+  pickupRadius,
+  dropRadius,
+  status: 'active',
+  pickupTriggeredAt: null,
+  dropTriggeredAt: null,
+  createdAt: serverTimestamp(),
+});
+```
+
+## Pickup & Delivery Arrival Detection
+This polling loop detects when the volunteer enters the pickup or drop radius and fires each event once.
+```js
+if (!pickupArrived && dPickup != null && dPickup <= pickupRadius) {
+  pickupArrived = true;
+  recordGeofenceEvent(db, donationId, volunteerId, 'pickup_arrival', vLat, vLon, dPickup);
+  notifyArrival(db, donationId, 'pickup_arrival');
+  transitionDeliveryStatus(db, {
+    donationId,
+    status: 'Arrived at Pickup',
+    actor,
+    notes: `Geofence: arrived at pickup (${dPickup.toFixed(0)}m).`,
+  }).catch(() => {});
+}
+
+if (!dropArrived && pickupArrived && dDrop != null && dDrop <= dropRadius) {
+  dropArrived = true;
+  recordGeofenceEvent(db, donationId, volunteerId, 'drop_arrival', vLat, vLon, dDrop);
+  notifyArrival(db, donationId, 'drop_arrival');
+  transitionDeliveryStatus(db, {
+    donationId,
+    status: 'Arriving Soon',
+    actor,
+    notes: `Geofence: arrived near drop location (${dDrop.toFixed(0)}m).`,
+  }).catch(() => {});
+}
+```
+
+## Automatic Status Transition Logic
+The geofence manager writes the delivery status updates directly when boundaries are crossed.
+```js
+transitionDeliveryStatus(db, {
+  donationId,
+  status: 'Arrived at Pickup',
+  actor,
+  notes: `Geofence: arrived at pickup (${dPickup.toFixed(0)}m).`,
+});
+
+transitionDeliveryStatus(db, {
+  donationId,
+  status: 'Arriving Soon',
+  actor,
+  notes: `Geofence: arrived near drop location (${dDrop.toFixed(0)}m).`,
+});
+```
+
+# 5. In-App Chat Module
+
+## Real-Time Chat Message Synchronization
+This listener keeps the message thread and chat list updated in real time.
+```js
+export function listenToMessages(chatId, onMessages) {
+  const q = query(
+    collection(db, 'chats', chatId, 'messages'),
+    orderBy('createdAt', 'asc'),
+    limit(150)
+  );
+  return onSnapshot(q, (snap) => {
+    onMessages(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  });
+}
+
+export function listenToUserChats(userId, onChats) {
+  const q = query(
+    collection(db, 'chats'),
+    where('participantIds', 'array-contains', userId),
+    orderBy('lastMessageAt', 'desc'),
+    limit(30)
+  );
+  return onSnapshot(q, (snap) => onChats(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+}
+```
+
+## Firebase Chat Collection Integration
+This code creates a donation-scoped chat room and stores participant metadata in Firestore.
+```js
+export async function getOrCreateChatRoom(donationId) {
+  const chatRef = doc(db, 'chats', donationId);
+  const snap = await getDoc(chatRef);
+  if (snap.exists()) return { id: chatRef.id, ...snap.data() };
+
+  const donationSnap = await getDoc(doc(db, 'donations', donationId));
+  const d = donationSnap.data();
+  const participantIds = [d.donorId, d.beneficiaryId || d.offeredTo, d.assignedVolunteerId].filter(Boolean);
+
+  await setDoc(chatRef, {
+    donationId,
+    participantIds,
+    unread: participantIds.reduce((acc, uid) => ({ ...acc, [uid]: 0 }), {}),
+    createdAt: serverTimestamp(),
+  });
+}
+```
+
+## Chat Notification Handling
+This notification helper fans out a message alert to every chat participant except the sender.
+```js
+export async function notifyChatMessage(participantIds, senderId, senderName, chatId, preview) {
+  const recipients = (participantIds || []).filter((uid) => uid && uid !== senderId);
+  await Promise.all(
+    recipients.map((userId) =>
+      createNotification(
+        userId,
+        NOTIFICATION_TYPES.CHAT_MESSAGE,
+        `New message from ${senderName}`,
+        preview ? preview.slice(0, 80) : 'You have a new message',
+        { chatId, senderId, senderName }
+      )
+    )
+  );
+}
+```
+
+# 6. Push Notification System
+
+## Firebase Cloud Messaging Integration
+This service registers the device FCM token in Firestore and keeps it refreshed for later push delivery.
+```js
+export async function registerFCMToken(userId) {
+  const { status: existingStatus } = await Notifications.getPermissionsAsync();
+  let finalStatus = existingStatus;
+  if (existingStatus !== 'granted') {
+    const { status } = await Notifications.requestPermissionsAsync();
+    finalStatus = status;
+  }
+  const tokenData = await Notifications.getDevicePushTokenAsync();
+  const fcmToken = tokenData?.data;
+  await updateDoc(doc(db, 'users', userId), {
+    fcmToken,
+    fcmTokenUpdatedAt: serverTimestamp(),
+    fcmPlatform: Platform.OS,
+  });
+  return fcmToken;
+}
+```
+
+## Real-Time Notification Trigger Logic
+This Cloud Function pushes delivery updates whenever the tracking status changes.
+```js
+exports.onDeliveryTrackingUpdate = onDocumentUpdated('deliveryTracking/{donationId}', async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  if (!after.currentStatus || after.currentStatus === before.currentStatus) return null;
+
+  const recipientIds = [after.donorId, after.beneficiaryId].filter(Boolean);
+  const userSnaps = await Promise.all(recipientIds.map((uid) => db.doc(`users/${uid}`).get()));
+  const messages = userSnaps
+    .filter((snap) => snap.exists && snap.data().fcmToken)
+    .map((snap) => ({ token: snap.data().fcmToken, notification: { title: `Delivery Update: ${after.currentStatus}`, body } }));
+  await messaging.sendEach(messages);
+});
+```
+
+## Delivery Status Notification Workflow
+This helper maps delivery states to user-facing notifications and persists them in Firestore.
+```js
+export async function notifyDeliveryStatusTransition(donorId, beneficiaryId, status, foodItem = 'donation') {
+  const title = `Delivery Update: ${status}`;
+  let message = `The delivery status for your ${foodItem} is now: ${status}`;
+
+  if (status === 'Volunteer Assigned') message = `A volunteer has been assigned for your ${foodItem}!`;
+  else if (status === 'Delivered Pending Verification') message = `The volunteer has arrived. Please provide the OTP to verify delivery of ${foodItem}.`;
+
+  if (donorId) {
+    await createNotification({ userId: donorId }, NOTIFICATION_TYPES.LOCATION_UPDATED, title, message, { foodItem, status });
+  }
+  if (beneficiaryId) {
+    await createNotification({ userId: beneficiaryId }, NOTIFICATION_TYPES.LOCATION_UPDATED, title, message, { foodItem, status });
+  }
+}
+```
+
+# 7. Volunteer Reward & Recognition System
+
+## Reward Point Calculation Logic
+This function computes delivery points, streak bonuses, and weekly/monthly totals for each volunteer.
+```js
+export async function awardDeliveryPoints(volunteerId, volunteerName, { verified = false, onTime = false } = {}) {
+  await initRewards(volunteerId, volunteerName);
+  const ref = doc(db, 'rewards', volunteerId);
+  const data = (await getDoc(ref)).data();
+
+  const today = todayStr();
+  const yesterday = yesterdayStr();
+  const lastDate = data.lastDeliveryDate;
+  let newStreak = 1;
+  if (lastDate === yesterday) newStreak = (data.currentStreak || 0) + 1;
+  else if (lastDate === today) newStreak = data.currentStreak || 1;
+
+  let pts = verified ? POINTS.DELIVERY_VERIFIED : POINTS.DELIVERY_COMPLETED;
+  if (onTime) pts += POINTS.ON_TIME_PICKUP;
+  pts += Math.min(newStreak, 10) * POINTS.STREAK_BONUS;
+
+  await updateDoc(ref, { totalPoints: increment(pts), currentStreak: newStreak, updatedAt: serverTimestamp() });
+  return { pts, newStreak };
+}
+```
+
+## Badge Generation Mechanism
+This badge pass awards recognition once thresholds for deliveries, verification, or streaks are reached.
+```js
+async function checkAndAwardBadges(volunteerId, data) {
+  const earned = new Set(data.badges || []);
+  const toAward = [];
+  const deliveries = data.deliveriesCompleted || 0;
+  const verified = data.verifiedDeliveries || 0;
+  const streak = data.currentStreak || 0;
+
+  if (deliveries >= 1 && !earned.has('first_delivery')) toAward.push('first_delivery');
+  if (verified >= 10 && !earned.has('verified_10')) toAward.push('verified_10');
+  if (streak >= 5 && !earned.has('streak_5')) toAward.push('streak_5');
+  if (streak >= 10 && !earned.has('streak_10')) toAward.push('streak_10');
+
+  if (toAward.length > 0) {
+    await updateDoc(doc(db, 'rewards', volunteerId), { badges: Array.from(new Set([...earned, ...toAward])) });
+  }
+}
+```
+
+## Volunteer Ranking Algorithm
+This leaderboard query ranks volunteers by total points and limits the result set for the admin view.
+```js
+export async function getLeaderboard(topN = 10) {
+  const q = query(
+    collection(db, 'rewards'),
+    orderBy('totalPoints', 'desc'),
+    limit(topN)
+  );
+  const snap = await getDocs(q);
+  return snap.docs.map((d, i) => ({ rank: i + 1, ...d.data() }));
+}
+```
+
+# 8. Analytics Dashboard Module
+
+## Operational Statistics Aggregation
+This admin dashboard listener computes live counts for donations, volunteers, beneficiaries, and impact totals.
+```js
+const donUnsub = onSnapshot(collection(db, 'donations'), snap => {
+  let total = 0, completed = 0, pending = 0, cancelled = 0, foodKg = 0;
+  snap.docs.forEach(d => {
+    const data = d.data();
+    total++;
+    const s = data.status || '';
+    if (['Completed', 'Completed Verified'].includes(s)) { completed++; foodKg += parseFloat(data.quantity) || 0; }
+    if (['Pending', 'Offered', 'Pending Pickup'].includes(s)) pending++;
+    if (s === 'Cancelled') cancelled++;
+  });
+  setStats(p => ({ ...p, totalDonations: total, completedDeliveries: completed, pendingDeliveries: pending, cancelledDonations: cancelled, foodSavedKg: foodKg }));
+});
+```
+
+## Graph & Chart Data Processing
+This chart builder converts Firestore donation documents into weekly, monthly, pie-chart, and volunteer-performance datasets.
+```js
+snap.docs.forEach(d => {
+  const data = d.data();
+  const ts = data.createdAt?.toMillis?.() ?? 0;
+  if (ts > 0) {
+    const dAgo = Math.floor((Date.now() - ts) / 86400000);
+    if (dAgo < 7) wk[6 - dAgo]++;
+    mo[new Date(ts).getMonth()]++;
+  }
+  statusMap[data.status || 'Unknown'] = (statusMap[data.status || 'Unknown'] || 0) + 1;
+  catMap[data.foodType || data.foodCategory || 'Other'] = (catMap[data.foodType || data.foodCategory || 'Other'] || 0) + 1;
+});
+
+setStatusPie(makePie(statusMap, PIE_COLORS));
+setCategoryPie(makePie(catMap, ['#06b6d4', '#8b5cf6', '#f97316', '#ec4899']));
+```
+
+## Food Waste Reduction Analytics
+This report computes food saved, estimated meals, and success rate from completed deliveries.
+```js
+const completed = donations.filter(d => ['Completed', 'Completed Verified'].includes(d.status));
+const foodSaved = completed.reduce((s, d) => s + (parseFloat(d.quantity) || 0), 0);
+
+return {
+  foodSavedKg: foodSaved.toFixed(1),
+  mealsEstimated: Math.round(foodSaved * 2.5),
+  successRate: donations.length > 0 ? Math.round((completed.length / donations.length) * 100) : 0,
+};
+```
+
+# 9. Firebase Cloud Functions Automation
+
+## Event-Driven Backend Processing
+These Firestore triggers move the donation through the offer and assignment pipeline without polling.
+```js
+exports.onDonationCreate = onDocumentCreated('donations/{donationId}', async (event) => {
+  const donation = event.data.data();
+  const nearest = ...;
+  await event.data.ref.update({ status: 'Offered', offeredTo: nearest.id, offerExpiry });
+  if (beneficiary && beneficiary.fcmToken) {
+    await messaging.send({ token: beneficiary.fcmToken, notification: { title: 'New Donation Offer!' } });
+  }
+});
+
+exports.onDonationUpdate = onDocumentUpdated('donations/{donationId}', async (event) => {
+  if (before.status !== 'Pending Pickup' && after.status === 'Pending Pickup' && after.beneficiaryId) {
+    return createDeliveryTaskForDonation({ db, donationId, donation: after });
+  }
+});
+```
+
+## Automated Assignment Handling
+This helper builds the volunteer candidate queue, creates the delivery task, and reassigns on rejection or timeout.
+```js
+async function createDeliveryTaskForDonation({ db, donationId, donation }) {
+  const candidates = await fetchAvailableVolunteers(db, donation.location);
+  const candidateQueue = candidates.map((c) => ({ id: c.id, distanceKm: c.distanceKm }));
+  const first = candidateQueue[0] || null;
+
+  await db.collection('deliveryTasks').doc(donationId).set({
+    donationId,
+    candidateQueue,
+    rejectedVolunteers: [],
+    currentCandidateIndex: first ? 0 : -1,
+    currentVolunteerId: first ? first.id : null,
+    status: first ? 'Offered' : 'Unassigned',
+    offerExpiry: first ? Timestamp.fromMillis(Date.now() + MAX_VOLUNTEER_RESPONSE_SECONDS * 1000) : null,
+  });
+}
+```
+
+## Notification Trigger Cloud Functions
+This trigger sends push notifications when delivery tracking changes state.
+```js
+exports.onDeliveryTrackingUpdate = onDocumentUpdated('deliveryTracking/{donationId}', async (event) => {
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  if (!after.currentStatus || after.currentStatus === before.currentStatus) return null;
+  const body = DELIVERY_STATUS_MESSAGES[after.currentStatus];
+  if (!body) return null;
+  const recipientIds = [after.donorId, after.beneficiaryId].filter(Boolean);
+  const userSnaps = await Promise.all(recipientIds.map((uid) => db.doc(`users/${uid}`).get()));
+  await messaging.sendEach(userSnaps
+    .filter((snap) => snap.exists && snap.data().fcmToken)
+    .map((snap) => ({ token: snap.data().fcmToken, notification: { title: `Delivery Update: ${after.currentStatus}`, body } })));
+});
+```
+
+# 10. Real-Time Firestore Synchronization
+
+## Firestore Real-Time Listener Integration
+This listener keeps the notification feed live for the signed-in user and unsubscribes cleanly on logout.
+```js
+export function listenToUserNotifications(userId, callback) {
+  const q = query(
+    collection(db, 'notifications'),
+    where('userId', '==', userId),
+    orderBy('createdAt', 'desc')
+  );
+  return onSnapshot(q, (snapshot) => {
+    const notifications = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    callback(notifications);
+  });
+}
+```
+
+## Donation Status Synchronization
+This hook synchronizes the latest delivery status for each donation directly from Firestore.
+```js
+useEffect(() => {
+  if (!donationId || !enabled) return;
+  const trackingRef = doc(db, 'deliveryTracking', donationId);
+  const unsubscribe = onSnapshot(trackingRef, (snap) => {
+    if (snap.exists()) {
+      setTracking({ id: snap.id, ...snap.data() });
+    } else {
+      setTracking(null);
+    }
+  });
+  return () => unsubscribe();
+}, [donationId, enabled]);
+```
+
+## Multi-User Data Update Handling
+This hook merges live tracking and fallback delivery tracking so donor, beneficiary, and volunteer screens stay consistent.
+```js
+useEffect(() => {
+  const unsub = subscribeToLiveTracking(donationId, (data) => {
+    setTrackingDoc(data);
+    if (data?.latitude && data?.longitude) {
+      setVolunteerPos({ latitude: data.latitude, longitude: data.longitude, _source: 'live' });
+    }
+  });
+  const fallbackUnsub = onSnapshot(doc(db, 'deliveryTracking', donationId), (snap) => setDeliveryDoc(snap.exists() ? snap.data() : null));
+  return () => { unsub(); fallbackUnsub(); };
+}, [donationId]);
+```
+
+# 11. Delivery Timeline & Activity Logging
+
+## Delivery Event Recording
+This function appends immutable delivery events inside the same transaction as the delivery update.
+```js
+export function appendDeliveryTrackingEvent(transaction, db, payload) {
+  const trackingRef = doc(db, 'deliveryTracking', payload.donationId);
+  transaction.set(trackingRef, {
+    donationId: payload.donationId,
+    currentStatus: payload.status,
+    updatedAt: serverTimestamp(),
+    timelineEvents: arrayUnion({
+      status: payload.status,
+      timestamp: Timestamp.now(),
+      actor: payload.actor || null,
+      notes: payload.notes || '',
+    }),
+  }, { merge: true });
+  return trackingRef;
+}
+```
+
+## Status Timeline Generation
+This hook reshapes timeline events into sorted view models with labels and actor names.
+```js
+const timeline = useMemo(() => {
+  const events = Array.isArray(tracking?.timelineEvents) ? tracking.timelineEvents : [];
+  return events
+    .map((event, index) => ({
+      id: `${tracking?.id || donationId || 'delivery'}-${index}`,
+      status: event.status,
+      actorName: event.actor?.name || event.actor?.role || 'System',
+      note: event.notes || '',
+    }))
+    .sort((left, right) => toTimestampValue(left.eventTimestamp) - toTimestampValue(right.eventTimestamp));
+}, [donationId, tracking]);
+```
+
+## Operational Activity Tracking
+This summary groups donation history events and produces a compact operational report for the admin dashboard.
+```js
+export function summarizeDonationHistory(groups = []) {
+  const totalDonations = groups.length;
+  const successfulDeliveries = groups.filter((group) => group.lifecycleState === 'completed').length;
+  const mealsServed = groups.reduce((total, group) => {
+    if (group.lifecycleState !== 'completed') return total;
+    return total + (Number(group.quantity) || 1);
+  }, 0);
+  return { totalDonations, successfulDeliveries, mealsServed };
+}
+```
+
+# 12. Secure Role-Based Access Control
+
+## Role Validation Middleware
+These Firestore rules functions enforce authenticated access, admin checks, and role-aware writes.
+```js
+function isSignedIn() {
+  return request.auth != null;
+}
+
+function callerRole() {
+  return get(/databases/$(database)/documents/users/$(uid())).data.role;
+}
+
+function isAdmin() {
+  return isSignedIn() && callerRole().matches('(?i)^admin$');
+}
+```
+
+## Session Management Logic
+This auth context maintains the signed-in session, handles cold-launch sign-out, and refreshes push tokens when the user changes.
+```js
+useEffect(() => {
+  signOut(auth).finally(() => {
+    setColdLaunchCleared(true);
+    unsubAuth = onAuthStateChanged(auth, async (u) => {
+      if (tokenRefreshUnsub.current) tokenRefreshUnsub.current();
+      if (u) {
+        setUser(u);
+        registerFCMToken(u.uid).catch(() => {});
+        tokenRefreshUnsub.current = listenForTokenRefresh(u.uid);
+      }
+    });
+  });
+}, []);
+```
+
+## Firebase Authentication Integration
+This provider supports Google OAuth, email/password sign-in, account creation, and password reset.
+```js
+const signInWithGoogle = (role = 'Donor') => {
+  pendingRoleRef.current = role;
+  promptAsync();
+};
+
+const signInWithEmail = async (email, password, expectedRole) => {
+  const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+  const snap = await getDoc(doc(db, 'users', cred.user.uid));
+  if (expectedRole && snap.data().role !== expectedRole) await signOut(auth);
+};
+
+const signUpWithEmail = async ({ name, email, password, role, location }) => {
+  const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  await setDoc(doc(db, 'users', cred.user.uid), { uid: cred.user.uid, name: name.trim(), email: email.trim(), role, location, createdAt: serverTimestamp() });
+};
+```
+
+# 13. Map & Navigation Integration
+
+## Google Maps Integration
+This service wraps the Google Directions and Distance Matrix APIs and falls back gracefully when a key is unavailable.
+```js
+export async function fetchRoute(origin, destination, opts = {}) {
+  if (!GOOGLE_MAPS_KEY) return _fallbackRoute(origin, destination);
+  const params = new URLSearchParams({
+    origin: `${origin.latitude},${origin.longitude}`,
+    destination: `${destination.latitude},${destination.longitude}`,
+    mode: 'driving',
+    key: GOOGLE_MAPS_KEY,
+  });
+  const json = await (await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params}`)).json();
+  if (json.status !== 'OK') return _fallbackRoute(origin, destination);
+}
+```
+
+## Pickup & Delivery Route Visualization
+This snippet prepares polyline coordinates and route steps for map rendering and route overlays.
+```js
+const leg = json.routes[0].legs[0];
+const poly = json.routes[0].overview_polyline.points;
+const coords = decodePolyline(poly);
+
+return {
+  polylineCoords: coords,
+  encodedPolyline: poly,
+  distanceMeters: leg.distance.value,
+  durationSeconds: leg.duration.value,
+  steps: leg.steps.map(s => ({
+    instruction: s.html_instructions.replace(/<[^>]+>/g, ''),
+    startLocation: { latitude: s.start_location.lat, longitude: s.start_location.lng },
+  })),
+};
+```
+
+## Navigation Support Functions
+These helper functions compute route deviation and provide a traffic-aware ETA for navigation screens.
+```js
+export function getRouteDeviation(currentPos, polylineCoords) {
+  if (!polylineCoords?.length || !currentPos?.latitude) return Infinity;
+  let minDist = Infinity;
+  for (let i = 0; i < polylineCoords.length - 1; i++) {
+    const d = _pointToSegmentDistance(currentPos, polylineCoords[i], polylineCoords[i + 1], 6_371_000);
+    if (d < minDist) minDist = d;
+  }
+  return minDist;
+}
+```
+
+# 14. Cloud Database Management
+
+## Firestore Collection Structure
+This compact view shows the main collection paths used by the advanced workflow modules.
+```js
+const chatRef = doc(db, 'chats', donationId);
+const trackingRef = doc(db, 'deliveryTracking', donationId);
+const eventRef = doc(collection(db, DONATION_HISTORY_COLLECTION));
+const notificationsRef = collection(db, 'notifications');
+const liveTrackingRef = doc(db, 'liveTracking', donationId);
+```
+
+## Real-Time Data Storage Logic
+This update path merges tracking data atomically so multiple clients can safely observe the same document.
+```js
+transaction.set(trackingRef, {
+  donationId,
+  currentStatus: status,
+  pickupLocation,
+  dropLocation,
+  volunteerId,
+  etaMinutes,
+  verification: {
+    otp: verification?.otp,
+    qrToken: verification?.qrToken,
+    verified: verification?.verified,
+    verifiedAt: verification?.verifiedAt,
+  },
+}, { merge: true });
+```
+
+## Notification History Management
+These helpers support persistent notifications and unread-state management for each user.
+```js
+export async function createNotification(recipientData, type, title, message, relatedData = {}) {
+  const notificationData = {
+    type,
+    title,
+    message,
+    read: false,
+    createdAt: serverTimestamp(),
+    ...recipientData,
+    ...relatedData,
+  };
+  await setDoc(doc(collection(db, 'notifications')), notificationData);
+}
+
+export async function markAllAsRead(userId) {
+  const q = query(collection(db, 'notifications'), where('userId', '==', userId), where('read', '==', false));
+  const snapshot = await getDocs(q);
+  await Promise.all(snapshot.docs.map((d) => setDoc(d.ref, { read: true }, { merge: true })));
+}
+```
+
+# 15. End-to-End Donation Workflow Processing
+
+## Complete Donation Lifecycle Workflow
+This acceptance entry point starts the donation handoff by forwarding the request into the beneficiary acceptance flow.
+```js
+export async function handleFoodRequestAcceptance(requestId, pickupLat, pickupLon) {
+  const db = getFirestore();
+  const pickupLocation = { latitude: pickupLat, longitude: pickupLon };
+  await handleDonationAcceptance(requestId, pickupLocation, {}, {});
+}
+```
+
+## Pickup-to-Delivery State Management
+This volunteer acceptance transaction moves the donation into the delivery stage and writes the first tracking event.
+```js
+await runTransaction(db, async (transaction) => {
+  const donationSnap = await transaction.get(donationRef);
+  const volunteerSnap = await transaction.get(volunteerRef);
+  transaction.update(donationRef, {
+    assignedVolunteerId: volunteerId,
+    volunteerAcceptedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  transaction.update(volunteerRef, {
+    availability: 'busy',
+    assignedDonationId: donationId,
+    transportAvailability: false,
+    updatedAt: serverTimestamp(),
+  });
+  appendDeliveryTrackingEvent(transaction, db, {
+    donationId,
+    volunteerId,
+    status: 'En Route to Donor',
+    actor: { userId: volunteerId, name: volunteerProfile.name, role: 'volunteer' },
+  });
+});
+```
+
+## Final Delivery Completion Processing
+This completion transaction updates donation, tracking, history, notifications, and volunteer rewards in one flow.
+```js
+await runTransaction(db, async (transaction) => {
+  transaction.update(donationRef, {
+    status: 'Completed',
+    assignedVolunteerId: volunteerId,
+    completedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  transaction.update(volunteerRef, {
+    availability: transportActive ? 'available' : 'inactive',
+    transportAvailability: !!transportActive,
+    assignedDonationId: null,
+    updatedAt: serverTimestamp(),
+  });
+  transaction.set(trackingRef, {
+    currentStatus: 'Completed Verified',
+    verification: { verified: true, verifiedAt: serverTimestamp() },
+  }, { merge: true });
+  appendDonationHistoryEvent(transaction, db, { donationId, eventType: 'completed', status: 'Completed Verified', actor: { userId: volunteerId, name: volunteerProfile.name, role: 'volunteer' } });
+});
+```
+
+# 16. Food Quality Verification Module
+
+## Food Quality Image Upload
+This hook converts image files to base64, uploads the originals, and prepares the AI assessment payload.
+```js
+const imageToBase64 = async (uri) => {
+  if (!uri) throw new Error('Image URI is required.');
+  const base64Encoding = FileSystem?.EncodingType?.Base64 || 'base64';
+  return FileSystem.readAsStringAsync(uri, { encoding: base64Encoding });
+};
+
+const base64Images = await Promise.all(imagesUris.map(uri => imageToBase64(uri)));
+const uploadResults = await Promise.allSettled(
+  imagesUris.map((uri, idx) => uploadImage(uri, storagePaths.assessmentImage(sessionId, idx)))
+);
+```
+
+## Volunteer Food Inspection Validation
+This Gemini request asks the model to classify the food as Safe, Caution, or Spoiled from the image and metadata.
+```js
+export const analyzeFoodQuality = async ({ base64Images, inputValues }) => {
+  const promptText = `
+You are an expert AI Food Quality Assessment system.
+Analyze the provided food images and structured input data.
+Respond ONLY with JSON:
+{ "qualityStatus": "Safe" | "Caution" | "Spoiled", "confidenceScore": number, "recommendation": string }
+`;
+
+  const requestBody = {
+    contents: [{ parts: [{ text: promptText }, ...base64Images.map(base64 => ({ inlineData: { mimeType: 'image/jpeg', data: base64 } }))] }],
+    generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+  };
+};
+```
+
+## Food Safety Verification Workflow
+This workflow stores the assessment result in Firestore after the AI review completes.
+```js
+const assessmentResult = await analyzeFoodQuality({ base64Images, inputValues });
+setResult(assessmentResult);
+
+await addDoc(collection(db, 'foodQualityAssessments'), {
+  inputValues,
+  aiAssessment: assessmentResult,
+  imageUrls: storedImageUrls,
+  createdAt: serverTimestamp(),
+});
+```
+
+## Quality Status Update Handling
+This state update path returns the parsed assessment result to the caller and surfaces any error state for the UI.
+```js
+try {
+  const parsed = JSON.parse(jsonText);
+  return parsed;
+} catch (parseError) {
+  throw new Error('Gemini API returned invalid JSON.');
+}
+
+finally {
+  setLoading(false);
+}
+```

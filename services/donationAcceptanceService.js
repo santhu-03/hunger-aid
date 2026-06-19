@@ -2,6 +2,7 @@ import { getAuth } from 'firebase/auth';
 import { doc, getDoc, getFirestore, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { Alert } from 'react-native';
 import { appendDonationHistoryEvent, resolveUserProfile } from './donationHistoryService';
+import { appendDeliveryTrackingEvent, normalizeTrackingLocation } from './deliveryTrackingService';
 import { notifyDonationAccepted, notifyVolunteerAssigned } from './notificationService';
 import { assignNearestVolunteer, findAllAvailableVolunteers, markAsWaitingForVolunteer } from './volunteerAssignmentService';
 
@@ -43,10 +44,31 @@ export async function handleDonationAcceptance(
     const donorProfile = donorId ? await resolveUserProfile(db, donorId, 'Donor') : { userId: donorId, name: 'Donor', role: '' };
 
     // Mark donation accepted and write the history event atomically.
+    const trackingPickupLocation = normalizeTrackingLocation(pickupLocation);
+    const trackingDropLocation = normalizeTrackingLocation(dropLocation);
+
     await runTransaction(db, async (transaction) => {
+      // READS MUST HAPPEN BEFORE WRITES
+      // appendDeliveryTrackingEvent performs a transaction.get()
+      await appendDeliveryTrackingEvent(transaction, db, {
+        donationId,
+        donorId: donorId || null,
+        beneficiaryId,
+        volunteerId: null,
+        status: 'Pending Pickup',
+        pickupLocation: trackingPickupLocation,
+        dropLocation: trackingDropLocation,
+        actor: {
+          userId: beneficiaryId,
+          name: beneficiaryProfile.name,
+          role: 'beneficiary',
+        },
+        notes: 'Beneficiary accepted the donation. Awaiting volunteer assignment.',
+      });
+
       transaction.update(donationRef, {
-        status: 'accepted_by_beneficiary',
-        deliveryStatus: 'pending_volunteer_assignment',
+        status: 'Pending Pickup',
+        beneficiaryId,
         acceptedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -54,8 +76,7 @@ export async function handleDonationAcceptance(
       appendDonationHistoryEvent(transaction, db, {
         donationId,
         eventType: 'accepted',
-        status: 'accepted_by_beneficiary',
-        deliveryStatus: 'pending_volunteer_assignment',
+        status: 'Pending Pickup',
         donationData: {
           ...donationData,
           donorName: donorProfile.name,
@@ -84,14 +105,13 @@ export async function handleDonationAcceptance(
 
       // Assign nearest volunteer and create a single request
       console.log(`📢 Assigning nearest volunteer...`);
-      const assignedId = await assignNearestVolunteer(
+      const assigned = await assignNearestVolunteer(
         donationId,
-        availableVolunteers,
         pickupLocation,
         dropLocation,
         donationDetails
       );
-      console.log(`✅ Assignment complete! -> ${assignedId}`);
+      console.log(`✅ Assignment complete! -> ${assigned?.volunteerId || 'none'}`);
 
       // Get donor name for notification
       let donorName = 'A donor';
@@ -105,12 +125,11 @@ export async function handleDonationAcceptance(
 
       await notifyDonationAccepted(donorId, 'Beneficiary', foodItem);
       
-      if (assignedId) {
-        const assigned = availableVolunteers.find(v => v.volunteerId === assignedId);
+      if (assigned?.volunteerId) {
         await notifyVolunteerAssigned(
-          assignedId,
+          assigned.volunteerId,
           foodItem,
-          assigned?.distance || 0
+          assigned.distance || 0
         );
       }
 

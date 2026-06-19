@@ -1,0 +1,46 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ── Donation photos ────────────────────────────────────────────────────────
+    // Path: donations/{donationId}/{fileName}
+    // Any participant (donor, volunteer, beneficiary) or admin may read.
+    // Any authenticated user may upload — ownership is enforced at the app layer
+    // because Storage rules cannot cross-reference Firestore to verify donorId.
+    // The 10 MB cap and image MIME type requirement prevent abuse.
+    match /donations/{donationId}/{fileName} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // ── Profile pictures ───────────────────────────────────────────────────────
+    // Path: profilePics/{userId}.jpg
+    // Each user may only write to their own path; anyone authenticated may read.
+    match /profilePics/{fileName} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+        && fileName == request.auth.uid + '.jpg'
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // ── Food quality assessment images ─────────────────────────────────────────
+    // Path: foodQualityAssessments/{sessionId}/{fileName}
+    // sessionId is client-generated (not tied to auth UID in the path), so
+    // ownership cannot be path-verified here. Require auth + image type + size.
+    match /foodQualityAssessments/{sessionId}/{fileName} {
+      allow read:  if request.auth != null;
+      allow write: if request.auth != null
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // ── Deny everything else ───────────────────────────────────────────────────
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

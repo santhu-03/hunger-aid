@@ -1,7 +1,11 @@
-import { collection, deleteDoc, doc, getDoc, getDocs, getFirestore, query, runTransaction, serverTimestamp, setDoc, updateDoc, where } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, getFirestore, query, runTransaction, serverTimestamp, updateDoc, where } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
+import { log } from '../utils/logger';
 import { calculateHaversineDistance } from '../utils/haversineDistance';
 import { appendDonationHistoryEvent, resolveUserProfile } from './donationHistoryService';
-import { notifyDeliveryAccepted, notifyDeliveryRejected } from './notificationService';
+import { appendDeliveryTrackingEvent, normalizeTrackingLocation } from './deliveryTrackingService';
+import { notifyDeliveryAccepted, notifyDeliveryRejected, notifyVolunteerAssigned } from './notificationService';
+import { getOrCreateChatRoom, updateChatRoomVolunteer } from './chatService';
 
 /**
  * Find all available volunteers with their locations
@@ -9,59 +13,96 @@ import { notifyDeliveryAccepted, notifyDeliveryRejected } from './notificationSe
  * @param {number} pickupLon - Pickup location longitude
  * @returns {Promise<Array>} Array of volunteers with distances
  */
-export async function findAllAvailableVolunteers(pickupLat, pickupLon) {
+export async function findAllAvailableVolunteers(pickupLat, pickupLon, rejectedVolunteerIds = []) {
   try {
     const db = getFirestore();
-    console.log('🔍 Finding nearest volunteer for location:', { pickupLat, pickupLon });
-    
-    // Query users collection for volunteers
-    // Filter client-side to avoid complex compound index requirements
+    log('🔍 Finding nearest volunteer for location:', { pickupLat, pickupLon });
+
+    // Query uses the existing [role, transportAvailability] composite index.
+    // Role is stored as 'Volunteer' (capital V) — Firestore where is case-sensitive.
     const q = query(
       collection(db, 'users'),
+      where('role', '==', 'Volunteer'),
       where('transportAvailability', '==', true)
     );
 
-    console.log('📡 Executing query for available volunteers...');
-    const snapshot = await getDocs(q);
-    console.log(`📦 Query returned ${snapshot.size} documents`);
-    let nearestVolunteer = null;
-    let minDistance = Infinity;
+    log('📡 Executing query for available volunteers...');
+    let snapshot = await getDocs(q);
+    log(`📦 Query returned ${snapshot.size} documents`);
 
+    if (snapshot.size === 0) {
+      log('⚠️ No volunteers with transportAvailability=true. Trying all volunteers...');
+      const fallbackQ = query(
+        collection(db, 'users'),
+        where('role', '==', 'Volunteer')
+      );
+      snapshot = await getDocs(fallbackQ);
+      log(`📦 Fallback query returned ${snapshot.size} volunteers`);
+    }
+
+    const rejectedSet = new Set(rejectedVolunteerIds || []);
     const candidates = snapshot.docs
       .map((d) => ({ id: d.id, data: d.data() }))
-      .filter(({ data }) => {
+      .filter(({ id, data }) => {
         const role = (data.role || '').toLowerCase();
-        return role === 'volunteer';
+        const isBlocked = String(data.status || '').toLowerCase() === 'blocked';
+        const isBusy = String(data.availability || '').toLowerCase() === 'busy';
+        // transportActive being false means offline, undefined/true means online
+        const isOffline = data.transportActive === false;
+        const isRejected = rejectedSet.has(id);
+        
+        // Show detailed info for each volunteer
+        const passesFilter = role === 'volunteer' && !isBlocked && !isBusy && !isOffline && !isRejected;
+        
+        if (!passesFilter) {
+          if (isBlocked) {
+            log(`  ❌ ${id}: blocked`);
+          } else if (isBusy) {
+            log(`  ❌ ${id}: busy`);
+          } else if (isOffline) {
+            log(`  ❌ ${id}: offline`);
+          } else if (isRejected) {
+            log(`  ❌ ${id}: rejected`);
+          }
+        } else {
+          log(`  ✓ ${id}: qualified`);
+        }
+        
+        return passesFilter;
       });
-    console.log('👀 Volunteer candidates (available & role-filtered):', candidates.length);
+    log('👀 Total qualified candidates before location check:', candidates.length);
 
     const availableVolunteers = [];
 
     candidates.forEach(({ id, data: volunteer }) => {
       if (!volunteer.location?.latitude || !volunteer.location?.longitude) {
-        console.warn(`Volunteer ${id} skipped: missing location`);
+        console.warn(`⚠️ Volunteer ${id} SKIPPED: missing location (lat=${volunteer.location?.latitude}, lng=${volunteer.location?.longitude})`);
         return;
       }
 
-      const distance = calculateHaversineDistance(
-        pickupLat,
-        pickupLon,
-        volunteer.location.latitude,
-        volunteer.location.longitude
-      );
+      try {
+        const distance = calculateHaversineDistance(
+          pickupLat,
+          pickupLon,
+          volunteer.location.latitude,
+          volunteer.location.longitude
+        );
 
-      console.log(`➡️ Volunteer ${id} distance: ${distance.toFixed(2)} km, availability: ${volunteer.availability}`);
+        log(`✅ Volunteer ${id} distance: ${distance.toFixed(2)} km`);
 
-      availableVolunteers.push({
-        volunteerId: id,
-        ...volunteer,
-        distance,
-      });
+        availableVolunteers.push({
+          volunteerId: id,
+          ...volunteer,
+          distance,
+        });
+      } catch (distError) {
+        console.error(`❌ Error calculating distance for ${id}:`, distError.message);
+      }
     });
 
     // Sort by distance (nearest first)
     availableVolunteers.sort((a, b) => a.distance - b.distance);
-    console.log(`✅ Found ${availableVolunteers.length} available volunteers`);
+    log(`✅ Found ${availableVolunteers.length} available volunteers with valid locations`);
 
     return availableVolunteers;
   } catch (error) {
@@ -78,77 +119,225 @@ export async function findAllAvailableVolunteers(pickupLat, pickupLon) {
  */
 export async function assignNearestVolunteer(
   donationId,
-  availableVolunteers,
   pickupLocation,
   dropLocation,
-  donationDetails
+  donationDetails,
+  rejectedVolunteerIds = []
 ) {
-  if (!availableVolunteers || availableVolunteers.length === 0) return null;
   const db = getFirestore();
-  const nearest = availableVolunteers[0];
   const donationRef = doc(db, 'donations', donationId);
   const donationSnap = await getDoc(donationRef);
   const donationData = donationSnap.exists() ? donationSnap.data() : {};
-  const volunteerProfile = await resolveUserProfile(db, nearest.volunteerId, 'Volunteer');
+  const trackingPickupLocation = normalizeTrackingLocation(pickupLocation);
+  const trackingDropLocation = normalizeTrackingLocation(dropLocation);
+  const pickupLat = trackingPickupLocation?.lat;
+  const pickupLng = trackingPickupLocation?.lng;
 
-  // Clean donationDetails to remove undefined values
-  const cleanedDonationDetails = Object.fromEntries(
-    Object.entries(donationDetails || {}).filter(([_, value]) => value !== undefined)
-  );
+  // Verify the client is authenticated before attempting assignment writes.
+  const auth = getAuth();
+  const currentUid = auth?.currentUser?.uid;
+  if (!currentUid) {
+    throw new Error('Authentication required: user not signed in');
+  }
+  log('🔐 assignNearestVolunteer running as user:', currentUid);
+  log('📍 Normalized pickup location:', { pickupLat, pickupLng });
 
-  // Create a single transport request for the assigned volunteer
-  const transportRef = doc(collection(db, 'transportRequests'));
-  const requestData = {
-    donationId,
-    volunteerId: nearest.volunteerId,
-    donorId: null,
-    beneficiaryId: null,
-    pickupLocation,
-    dropLocation,
-    donationDetails: cleanedDonationDetails,
-    distance: nearest.distance,
-    status: 'pending',
-    createdAt: serverTimestamp(),
-  };
-
-  if (donationSnap.exists()) {
-    requestData.donorId = donationData.donorId || null;
-    requestData.beneficiaryId = donationData.beneficiaryId || donationData.offeredTo || null;
+  if (pickupLat == null || pickupLng == null) {
+    throw new Error('Pickup location is required to assign a volunteer');
   }
 
-  await runTransaction(db, async (transaction) => {
-    transaction.update(donationRef, {
-      assignedVolunteerId: nearest.volunteerId,
-      deliveryStatus: 'pending_volunteer_response',
-      status: 'waiting_for_volunteer_acceptance',
-      broadcastAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+  const availableVolunteers = await findAllAvailableVolunteers(
+    pickupLat,
+    pickupLng,
+    rejectedVolunteerIds
+  );
 
-    transaction.set(transportRef, requestData);
+  if (!availableVolunteers || availableVolunteers.length === 0) return null;
 
-    appendDonationHistoryEvent(transaction, db, {
-      donationId,
-      eventType: 'volunteer_assigned',
-      status: 'waiting_for_volunteer_acceptance',
-      deliveryStatus: 'pending_volunteer_response',
-      donationData: {
-        ...donationData,
-        ...cleanedDonationDetails,
-        volunteerName: volunteerProfile.name,
-      },
-      actor: {
-        userId: nearest.volunteerId,
-        name: volunteerProfile.name,
-        role: 'volunteer',
-      },
-      notes: 'Volunteer assigned to the donation.',
-    });
-  });
+  const candidateIds = availableVolunteers.map((volunteer) => volunteer.volunteerId);
 
-  console.log(`🚚 Assigned volunteer ${nearest.volunteerId} and created transport request for donation ${donationId}`);
+  let assignedVolunteer = null;
+  let lastError = null;
 
-  return nearest;
+  for (const candidate of availableVolunteers) {
+    try {
+      log(`🔄 Attempting to assign volunteer ${candidate.volunteerId}...`);
+      const volunteerProfile = await resolveUserProfile(db, candidate.volunteerId, 'Volunteer');
+      log(`✓ Resolved profile for ${candidate.volunteerId}`);
+
+      await runTransaction(db, async (transaction) => {
+        const donationSnapTx = await transaction.get(donationRef);
+        if (!donationSnapTx.exists()) {
+          throw new Error('Donation not found');
+        }
+
+        const donationDataTx = donationSnapTx.data();
+        if (donationDataTx.assignedVolunteerId && donationDataTx.assignedVolunteerId !== candidate.volunteerId) {
+          throw new Error('Donation already assigned');
+        }
+
+        const volunteerRef = doc(db, 'users', candidate.volunteerId);
+        const volunteerSnap = await transaction.get(volunteerRef);
+        if (!volunteerSnap.exists()) {
+          throw new Error('Volunteer not found');
+        }
+
+        const volunteerData = volunteerSnap.data() || {};
+        const isBusy    = String(volunteerData.availability || '').toLowerCase() === 'busy';
+        const isOffline = volunteerData.transportActive === false;
+
+        console.log(`  [TX] Volunteer ${candidate.volunteerId} state:`, {
+          availability:      volunteerData.availability,
+          transportActive:   volunteerData.transportActive,
+          transportAvail:    volunteerData.transportAvailability,
+          assignedDonationId: volunteerData.assignedDonationId || null,
+          isBusy,
+          isOffline,
+        });
+
+        // ── Self-healing check ─────────────────────────────────────────────────
+        // Volunteers can end up in an inconsistent state if a previous delivery
+        // completed without properly resetting their fields (OTP flow crash,
+        // completeDelivery transaction failure, etc.).  Self-heal any stuck state
+        // rather than indefinitely blocking this volunteer from new assignments.
+        const TERMINAL = ['Completed', 'Completed Verified', 'Failed', 'Cancelled'];
+        let isStuck = false;
+
+        if (volunteerData.assignedDonationId) {
+          // Has a prior assignment — check whether that donation is finished.
+          const prevRef  = doc(db, 'donations', volunteerData.assignedDonationId);
+          const prevSnap = await transaction.get(prevRef);
+          const prevStatus = prevSnap.exists() ? prevSnap.data().status : null;
+          const prevAssignedTo = prevSnap.exists() ? prevSnap.data().assignedVolunteerId : null;
+          console.log(`  [TX] Prior assignment ${volunteerData.assignedDonationId} status: ${prevStatus}, assignedTo: ${prevAssignedTo}`);
+
+          if (TERMINAL.includes(prevStatus) || !prevSnap.exists()) {
+            // Prior donation is done (or was deleted) — volunteer is stuck, self-heal.
+            isStuck = true;
+            console.log(`  [TX] Self-healing: prior donation terminal/gone for ${candidate.volunteerId}`);
+          } else if (prevAssignedTo && prevAssignedTo !== candidate.volunteerId) {
+            // Donation was reassigned to a different volunteer — this pointer is stale, self-heal.
+            isStuck = true;
+            console.log(`  [TX] Self-healing: prior donation reassigned away from ${candidate.volunteerId} to ${prevAssignedTo}`);
+          } else {
+            // Prior donation is still active and owned by this volunteer — genuinely busy.
+            console.log(`  [TX] Blocking: prior donation ${volunteerData.assignedDonationId} is still active (${prevStatus})`);
+            throw new Error('Volunteer unavailable');
+          }
+        } else if (isBusy) {
+          // availability === 'busy' but no assignedDonationId — inconsistent state, self-heal.
+          isStuck = true;
+          console.log(`  [TX] Self-healing: availability=busy but no assignedDonationId for ${candidate.volunteerId}`);
+        }
+
+        // After self-healing decisions, still block if offline (no override).
+        if (isOffline && !isStuck) {
+          console.log(`  [TX] Blocking: volunteer ${candidate.volunteerId} is offline (transportActive=false)`);
+          throw new Error('Volunteer unavailable');
+        }
+
+        // If genuinely busy AND not stuck, block.
+        if (isBusy && !isStuck) {
+          console.log(`  [TX] Blocking: volunteer ${candidate.volunteerId} isBusy=true and not stuck`);
+          throw new Error('Volunteer unavailable');
+        }
+
+        console.log(`  [TX] Updating records...`);
+
+        transaction.update(donationRef, {
+          assignedVolunteerId: candidate.volunteerId,
+          broadcastAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        transaction.update(volunteerRef, {
+          availability: 'busy',
+          assignedDonationId: donationId,
+          transportAvailability: false,
+          updatedAt: serverTimestamp(),
+        });
+
+        // Append delivery tracking event (this will create/merge the deliveryTracking doc).
+        // Ensure donorId/beneficiaryId are provided so security rules that require
+        // an owning id (donor/beneficiary/volunteer) pass for create operations.
+        appendDeliveryTrackingEvent(transaction, db, {
+          donationId,
+          donorId: donationDataTx.donorId || null,
+          beneficiaryId: donationDataTx.beneficiaryId || donationDataTx.offeredTo || null,
+          volunteerId: candidate.volunteerId,
+          status: 'Volunteer Assigned',
+          pickupLocation: trackingPickupLocation,
+          dropLocation: trackingDropLocation,
+          actor: {
+            userId: candidate.volunteerId,
+            name: volunteerProfile.name,
+            role: 'volunteer',
+          },
+          notes: 'Volunteer assigned to the delivery.',
+        });
+
+        // Additionally set the deliveryTracking doc merged fields explicitly so that
+        // request.resource.data contains donor/beneficiary ids for the initial create.
+        const trackingRef = doc(db, 'deliveryTracking', donationId);
+        transaction.set(trackingRef, {
+          donorId: donationDataTx.donorId || null,
+          beneficiaryId: donationDataTx.beneficiaryId || donationDataTx.offeredTo || null,
+          currentAssignedVolunteer: candidate.volunteerId,
+          lastComputedCandidates: candidateIds,
+          rejectedVolunteerIds,
+        }, { merge: true });
+
+        // Donation history event (creation allowed when participantIds contains requester)
+        appendDonationHistoryEvent(transaction, db, {
+          donationId,
+          eventType: 'volunteer_assigned',
+          status: 'Volunteer Assigned',
+          donationData: {
+            ...donationDataTx,
+            volunteerName: volunteerProfile.name,
+          },
+          actor: {
+            userId: candidate.volunteerId,
+            name: volunteerProfile.name,
+            role: 'volunteer',
+          },
+          notes: 'Volunteer assigned to the donation.',
+          extra: {
+            currentAssignedVolunteer: candidate.volunteerId,
+            lastComputedCandidates: candidateIds,
+            rejectedVolunteerIds,
+          },
+        });
+
+        console.log(`  [TX] Transaction committed successfully!`);
+      });
+
+      assignedVolunteer = candidate;
+      log(`✅ Successfully assigned volunteer ${candidate.volunteerId}!`);
+      break;
+    } catch (error) {
+      console.error(`❌ Assignment failed for volunteer ${candidate.volunteerId}:`, error?.message || error);
+      lastError = error;
+    }
+  }
+
+  if (!assignedVolunteer) {
+    if (lastError) {
+      console.warn('⚠️ No candidate could be assigned. Last error:', lastError.message || lastError);
+    }
+    return null;
+  }
+
+  log(`🚚 Assigned volunteer ${assignedVolunteer.volunteerId} for donation ${donationId}`);
+
+  // Open (or update) the chat room with the newly assigned volunteer — best-effort
+  getOrCreateChatRoom(donationId)
+    .then((room) =>
+      updateChatRoomVolunteer(donationId, assignedVolunteer.volunteerId, room.volunteerName || assignedVolunteer.name || 'Volunteer')
+    )
+    .catch((e) => console.warn('[Chat] Room init after assignment:', e.message));
+
+  return assignedVolunteer;
 }
 
 /**
@@ -167,56 +356,46 @@ export async function broadcastToVolunteers(
   donationDetails
 ) {
   try {
-    const db = getFirestore();
-    console.log(`📢 Broadcasting donation ${donationId} to ${volunteers.length} volunteers`);
-
-    // Get donation data
-    const donationRef = doc(db, 'donations', donationId);
-    const donationSnap = await getDoc(donationRef);
-    if (!donationSnap.exists()) {
-      throw new Error('Donation not found');
-    }
-    const donationData = donationSnap.data();
-
-    // Clean donationDetails to remove undefined values
-    const cleanedDonationDetails = Object.fromEntries(
-      Object.entries(donationDetails || {}).filter(([_, value]) => value !== undefined)
-    );
-
-    // Update donation status to pending volunteer response
-    await updateDoc(donationRef, {
-      deliveryStatus: 'pending_volunteer_response',
-      status: 'waiting_for_volunteer_acceptance',
-      broadcastAt: serverTimestamp(),
-      broadcastToVolunteers: volunteers.map((v) => v.volunteerId),
-    });
-
-    // Create transport request for each volunteer
-    const promises = volunteers.map(async (volunteer) => {
-      const tRef = doc(collection(db, 'transportRequests'));
-      const req = {
-        donationId,
-        volunteerId: volunteer.volunteerId,
-        donorId: donationData.donorId || null,
-        beneficiaryId: donationData.beneficiaryId || donationData.offeredTo || null,
-        pickupLocation,
-        dropLocation,
-        donationDetails: cleanedDonationDetails,
-        distance: volunteer.distance,
-        status: 'pending',
-        createdAt: serverTimestamp(),
-      };
-      console.log(`   📝 Creating request for volunteer ${volunteer.volunteerId}:`, req);
-      await setDoc(tRef, req);
-      console.log(`   ✉️ Sent to volunteer ${volunteer.volunteerId} (${volunteer.distance.toFixed(2)} km)`);
-    });
-
-    await Promise.all(promises);
-    console.log(`✅ Broadcast complete! ${volunteers.length} volunteers notified.`);
+    console.log(`📢 Broadcast disabled in centralized tracking. Assigning nearest volunteer for donation ${donationId}.`);
+    return assignNearestVolunteer(donationId, pickupLocation, dropLocation, donationDetails);
   } catch (error) {
     console.error('Error broadcasting to volunteers:', error);
     throw error;
   }
+}
+
+/**
+ * Force-reset a stuck volunteer's availability fields back to a clean state.
+ *
+ * Call this from the AdminDashboard (or a one-off console snippet) whenever a
+ * volunteer is permanently stuck in "busy" because a delivery was abandoned
+ * without going through the normal completion / rejection flow.
+ *
+ * Safe to call multiple times — idempotent.
+ *
+ * @param {string} volunteerId  The stuck volunteer's Firebase Auth UID.
+ */
+export async function resetStuckVolunteer(volunteerId) {
+  const db  = getFirestore();
+  const ref = doc(db, 'users', volunteerId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error(`Volunteer ${volunteerId} not found`);
+
+  const data = snap.data();
+  console.log(`[ResetVolunteer] Current state for ${volunteerId}:`, {
+    availability:       data.availability,
+    assignedDonationId: data.assignedDonationId,
+    transportActive:    data.transportActive,
+    transportAvailability: data.transportAvailability,
+  });
+
+  await updateDoc(ref, {
+    availability:          data.transportActive === false ? 'inactive' : 'available',
+    transportAvailability: data.transportActive !== false,
+    assignedDonationId:    null,
+    updatedAt:             serverTimestamp(),
+  });
+  console.log(`[ResetVolunteer] ✅ Reset complete for ${volunteerId}`);
 }
 
 /**
@@ -228,9 +407,15 @@ export async function markAsWaitingForVolunteer(donationId) {
   try {
     const db = getFirestore();
     const donationRef = doc(db, 'donations', donationId);
-    await updateDoc(donationRef, {
-      deliveryStatus: 'waiting_for_volunteer',
-      updatedAt: serverTimestamp(),
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(donationRef);
+      if (!snap.exists()) {
+        throw new Error('Donation not found');
+      }
+      transaction.update(donationRef, {
+        waitingForVolunteerAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
     });
 
     console.log(`Donation ${donationId} marked as waiting for volunteer`);
@@ -256,53 +441,56 @@ export async function acceptDelivery(donationId, volunteerId) {
     
     await runTransaction(db, async (transaction) => {
       const donationSnap = await transaction.get(donationRef);
+      const volunteerSnap = await transaction.get(volunteerRef);
 
       if (!donationSnap.exists()) {
         throw new Error('Donation not found');
       }
 
       const donationData = donationSnap.data();
+      const volunteerData = volunteerSnap.exists() ? volunteerSnap.data() : {};
+
+      if (donationData.assignedVolunteerId && donationData.assignedVolunteerId !== volunteerId) {
+        throw new Error('Donation assigned to another volunteer');
+      }
+
+      if (volunteerData.assignedDonationId && volunteerData.assignedDonationId !== donationId) {
+        throw new Error('Volunteer already assigned');
+      }
 
       // Update donation with assigned volunteer (first to accept wins)
       transaction.update(donationRef, {
         assignedVolunteerId: volunteerId,
-        deliveryStatus: 'accepted_by_volunteer',
-        status: 'in_delivery',
         volunteerAcceptedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
 
-      // Update THIS volunteer's transport request to accepted
-      const allTransportRequests = await getDocs(
-        query(
-          collection(db, 'transportRequests'),
-          where('donationId', '==', donationId),
-          where('volunteerId', '==', volunteerId)
-        )
-      );
-      
-      if (!allTransportRequests.empty) {
-        const myRequestRef = allTransportRequests.docs[0].ref;
-        transaction.update(myRequestRef, {
-          status: 'accepted',
-          acceptedAt: serverTimestamp(),
-        });
-      }
-
       // Set volunteer to busy and set transportAvailability to false (manual toggle is preserved in transportActive)
       transaction.update(volunteerRef, {
         availability: 'busy',
-        currentDeliveryStatus: 'in_progress',
         assignedDonationId: donationId,
         transportAvailability: false,
         updatedAt: serverTimestamp(),
       });
 
+      appendDeliveryTrackingEvent(transaction, db, {
+        donationId,
+        donorId: donationData.donorId || null,
+        beneficiaryId: donationData.beneficiaryId || donationData.offeredTo || null,
+        volunteerId,
+        status: 'En Route to Donor',
+        actor: {
+          userId: volunteerId,
+          name: volunteerProfile.name,
+          role: 'volunteer',
+        },
+        notes: 'Volunteer accepted the delivery and is en route to donor.',
+      });
+
       appendDonationHistoryEvent(transaction, db, {
         donationId,
         eventType: 'in_delivery',
-        status: 'in_delivery',
-        deliveryStatus: 'accepted_by_volunteer',
+        status: 'En Route to Donor',
         donationData: {
           ...donationData,
           volunteerName: volunteerProfile.name,
@@ -317,35 +505,6 @@ export async function acceptDelivery(donationId, volunteerId) {
     });
 
     console.log(`Delivery ${donationId} accepted by volunteer ${volunteerId}`);
-
-    // After transaction commits, delete all OTHER pending transport requests for this donation
-    // Doing this outside the transaction ensures security rules see the updated donation assignment
-    try {
-      const pendingOthers = await getDocs(
-        query(
-          collection(db, 'transportRequests'),
-          where('donationId', '==', donationId),
-          where('status', '==', 'pending')
-        )
-      );
-      const deletePromises = [];
-      pendingOthers.forEach((reqDoc) => {
-        const data = reqDoc.data();
-        if (data.volunteerId !== volunteerId) {
-          deletePromises.push((async () => {
-            try {
-              await deleteDoc(reqDoc.ref);
-              console.log(`🗑️ Deleted pending request ${reqDoc.id} for donation ${donationId}`);
-            } catch (err) {
-              console.warn(`Could not delete request ${reqDoc.id}:`, err?.message || err);
-            }
-          })());
-        }
-      });
-      await Promise.all(deletePromises);
-    } catch (cleanupErr) {
-      console.warn('Cleanup of other pending requests failed:', cleanupErr?.message || cleanupErr);
-    }
 
     // Notify donor and beneficiary that volunteer accepted delivery
     const donationSnap = await getDoc(donationRef);
@@ -393,62 +552,220 @@ export async function rejectDelivery(
     const volunteerSnap = await getDoc(volunteerRef);
     const volunteerData = volunteerSnap.data();
     const transportActive = volunteerData?.transportActive === true;
-    
-    // Find the transport request for this donation/volunteer
-    const transportRequests = await getDocs(
-      query(
-        collection(db, 'transportRequests'),
-        where('donationId', '==', donationId),
-        where('volunteerId', '==', volunteerId)
-      )
-    );
-    
-    const transportRequestRef = transportRequests.empty ? null : transportRequests.docs[0].ref;
-    
-    await runTransaction(db, async (transaction) => {
-      const donationSnap = await transaction.get(donationRef);
-      const donationData = donationSnap.exists() ? donationSnap.data() : {};
+    const trackingSnap = await getDoc(doc(db, 'deliveryTracking', donationId));
+    const trackingData = trackingSnap.exists() ? trackingSnap.data() : {};
+    const rejectedVolunteerIds = Array.isArray(trackingData.rejectedVolunteerIds)
+      ? trackingData.rejectedVolunteerIds
+      : [];
 
-      // Update donation (remove assignment, visible to all parties)
-      transaction.update(donationRef, {
-        deliveryStatus: 'rejected_by_volunteer',
-        rejectedBy: volunteerId,
-        rejectedAt: serverTimestamp(),
-        assignedVolunteerId: null,
-        updatedAt: serverTimestamp(),
-      });
+    const trackingPickupLocation = normalizeTrackingLocation(pickupLocation || trackingData.pickupLocation);
+    const trackingDropLocation = normalizeTrackingLocation(dropLocation || trackingData.dropLocation);
 
-      // Delete this volunteer's transport request
-      if (transportRequestRef) {
-        transaction.delete(transportRequestRef);
+    const pickupLat = trackingPickupLocation?.lat;
+    const pickupLng = trackingPickupLocation?.lng;
+
+    let availableVolunteers = [];
+    if (pickupLat != null && pickupLng != null) {
+      availableVolunteers = await findAllAvailableVolunteers(
+        pickupLat,
+        pickupLng,
+        [...rejectedVolunteerIds, volunteerId]
+      );
+    }
+
+    const candidateIds = availableVolunteers.map((volunteer) => volunteer.volunteerId);
+    let reassignedVolunteer = null;
+    let lastError = null;
+
+    for (const candidate of availableVolunteers) {
+      try {
+        const candidateProfile = await resolveUserProfile(db, candidate.volunteerId, 'Volunteer');
+
+        await runTransaction(db, async (transaction) => {
+          const donationSnapTx = await transaction.get(donationRef);
+          if (!donationSnapTx.exists()) {
+            throw new Error('Donation not found');
+          }
+
+          const donationData = donationSnapTx.data();
+          if (donationData.assignedVolunteerId && donationData.assignedVolunteerId !== volunteerId) {
+            throw new Error('Donation already reassigned');
+          }
+
+          const trackingRef = doc(db, 'deliveryTracking', donationId);
+          const trackingSnapTx = await transaction.get(trackingRef);
+          const trackingDataTx = trackingSnapTx.exists() ? trackingSnapTx.data() : {};
+
+          const volunteerRefCandidate = doc(db, 'users', candidate.volunteerId);
+          const candidateSnap = await transaction.get(volunteerRefCandidate);
+          if (!candidateSnap.exists()) {
+            throw new Error('Volunteer not found');
+          }
+
+          const candidateData = candidateSnap.data() || {};
+          const isBusy2    = String(candidateData.availability || '').toLowerCase() === 'busy';
+          const isOffline2 = candidateData.transportActive === false;
+
+          const TERMINAL2 = ['Completed', 'Completed Verified', 'Failed', 'Cancelled'];
+          let isStuck2 = false;
+
+          if (candidateData.assignedDonationId) {
+            const prevRef2  = doc(db, 'donations', candidateData.assignedDonationId);
+            const prevSnap2 = await transaction.get(prevRef2);
+            const prevStatus2   = prevSnap2.exists() ? prevSnap2.data().status : null;
+            const prevAssigned2 = prevSnap2.exists() ? prevSnap2.data().assignedVolunteerId : null;
+            if (TERMINAL2.includes(prevStatus2) || !prevSnap2.exists()) {
+              isStuck2 = true;
+            } else if (prevAssigned2 && prevAssigned2 !== candidate.volunteerId) {
+              // Donation was reassigned to someone else — stale pointer, self-heal.
+              isStuck2 = true;
+            } else {
+              throw new Error('Volunteer unavailable');
+            }
+          } else if (isBusy2) {
+            isStuck2 = true; // isBusy + no assignedDonationId = inconsistent, self-heal
+          }
+
+          if (isOffline2 && !isStuck2) throw new Error('Volunteer unavailable');
+          if (isBusy2 && !isStuck2)    throw new Error('Volunteer unavailable');
+
+          transaction.update(donationRef, {
+            rejectedBy: volunteerId,
+            rejectedAt: serverTimestamp(),
+            assignedVolunteerId: candidate.volunteerId,
+            updatedAt: serverTimestamp(),
+          });
+
+          transaction.update(volunteerRef, {
+            availability: transportActive ? 'available' : 'inactive',
+            transportAvailability: !!transportActive,
+            assignedDonationId: null,
+            updatedAt: serverTimestamp(),
+          });
+
+          transaction.update(volunteerRefCandidate, {
+            availability: 'busy',
+            assignedDonationId: donationId,
+            transportAvailability: false,
+            updatedAt: serverTimestamp(),
+          });
+
+          appendDeliveryTrackingEvent(transaction, db, {
+            donationId,
+            donorId: donationData.donorId || null,
+            beneficiaryId: donationData.beneficiaryId || donationData.offeredTo || null,
+            volunteerId: candidate.volunteerId,
+            status: 'Volunteer Assigned',
+            pickupLocation: trackingPickupLocation,
+            dropLocation: trackingDropLocation,
+            actor: {
+              userId: candidate.volunteerId,
+              name: candidateProfile.name,
+              role: 'volunteer',
+            },
+            notes: 'Volunteer reassigned after rejection.',
+          });
+
+          const nextRejected = Array.from(new Set([...(trackingDataTx.rejectedVolunteerIds || []), volunteerId]));
+          transaction.set(trackingRef, {
+            donorId: donationData.donorId || null,
+            beneficiaryId: donationData.beneficiaryId || donationData.offeredTo || null,
+            rejectedVolunteerIds: nextRejected,
+            lastComputedCandidates: candidateIds,
+            currentAssignedVolunteer: candidate.volunteerId,
+          }, { merge: true });
+
+          appendDonationHistoryEvent(transaction, db, {
+            donationId,
+            eventType: 'volunteer_assigned',
+            status: 'Volunteer Assigned',
+            donationData: {
+              ...donationData,
+              volunteerName: candidateProfile.name,
+            },
+            actor: {
+              userId: candidate.volunteerId,
+              name: candidateProfile.name,
+              role: 'volunteer',
+            },
+            notes: 'Volunteer reassigned after rejection.',
+          });
+        });
+
+        reassignedVolunteer = candidate;
+        break;
+      } catch (error) {
+        lastError = error;
       }
+    }
 
-      // Set volunteer back to their preferred state based on transportActive flag
-      transaction.update(volunteerRef, {
-        availability: transportActive ? 'available' : 'inactive',
-        transportAvailability: !!transportActive,
-        assignedDonationId: null,
-        currentDeliveryStatus: null,
-        updatedAt: serverTimestamp(),
+    if (!reassignedVolunteer) {
+      await runTransaction(db, async (transaction) => {
+        const donationSnapTx = await transaction.get(donationRef);
+        const donationData = donationSnapTx.exists() ? donationSnapTx.data() : {};
+
+        transaction.update(donationRef, {
+          rejectedBy: volunteerId,
+          rejectedAt: serverTimestamp(),
+          assignedVolunteerId: null,
+          updatedAt: serverTimestamp(),
+        });
+
+        transaction.update(volunteerRef, {
+          availability: transportActive ? 'available' : 'inactive',
+          transportAvailability: !!transportActive,
+          assignedDonationId: null,
+          updatedAt: serverTimestamp(),
+        });
+
+        const trackingRef = doc(db, 'deliveryTracking', donationId);
+        const trackingSnapTx = await transaction.get(trackingRef);
+        const trackingDataTx = trackingSnapTx.exists() ? trackingSnapTx.data() : {};
+        const nextRejected = Array.from(new Set([...(trackingDataTx.rejectedVolunteerIds || []), volunteerId]));
+
+        appendDeliveryTrackingEvent(transaction, db, {
+          donationId,
+          donorId: donationData.donorId || null,
+          beneficiaryId: donationData.beneficiaryId || donationData.offeredTo || null,
+          volunteerId: null,
+          status: 'Failed',
+          actor: {
+            userId: volunteerId,
+            name: volunteerProfile.name,
+            role: 'volunteer',
+          },
+          notes: 'Volunteer rejected the delivery.',
+        });
+
+        transaction.set(trackingRef, {
+          donorId: donationData.donorId || null,
+          beneficiaryId: donationData.beneficiaryId || donationData.offeredTo || null,
+          rejectedVolunteerIds: nextRejected,
+          lastComputedCandidates: candidateIds,
+          currentAssignedVolunteer: null,
+        }, { merge: true });
+
+        appendDonationHistoryEvent(transaction, db, {
+          donationId,
+          eventType: 'failed',
+          status: 'Failed',
+          donationData: {
+            ...donationData,
+            volunteerName: volunteerProfile.name,
+          },
+          actor: {
+            userId: volunteerId,
+            name: volunteerProfile.name,
+            role: 'volunteer',
+          },
+          notes: 'Volunteer rejected the delivery.',
+        });
       });
 
-      appendDonationHistoryEvent(transaction, db, {
-        donationId,
-        eventType: 'failed',
-        status: 'rejected_by_volunteer',
-        deliveryStatus: 'rejected_by_volunteer',
-        donationData: {
-          ...donationData,
-          volunteerName: volunteerProfile.name,
-        },
-        actor: {
-          userId: volunteerId,
-          name: volunteerProfile.name,
-          role: 'volunteer',
-        },
-        notes: 'Volunteer rejected the delivery.',
-      });
-    });
+      if (lastError) {
+        console.warn('Reassignment failed:', lastError.message || lastError);
+      }
+    }
 
     console.log(`Donation ${donationId} rejected by volunteer ${volunteerId}`);
 
@@ -462,6 +779,14 @@ export async function rejectDelivery(
         donationData.beneficiaryId || donationData.offeredTo,
         donationData.foodItem
       );
+      
+      if (reassignedVolunteer) {
+        await notifyVolunteerAssigned(
+          reassignedVolunteer.volunteerId,
+          donationData.foodItem,
+          reassignedVolunteer.distance ? reassignedVolunteer.distance.toFixed(1) : 'Unknown'
+        );
+      }
     }
   } catch (error) {
     console.error('Error rejecting delivery:', error);
